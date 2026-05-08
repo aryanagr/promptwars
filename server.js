@@ -1041,14 +1041,12 @@ app.post('/api/replan-activity', originGuard, writeApiLimiter, async (req, res) 
     if (!itinerary || !Array.isArray(itinerary.days) || !Number.isInteger(safeDayIndex) || !Number.isInteger(safeActivityIndex)) {
       return res.status(400).json({ success: false, error: 'Missing required fields for replan.' });
     }
-
-    if (!hasValidGeminiKey()) {
-      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
-    }
-
     const day = itinerary.days[safeDayIndex];
     if (!day || !Array.isArray(day.activities) || !day.activities[safeActivityIndex]) {
       return res.status(400).json({ success: false, error: 'Invalid day/activity index for replan.' });
+    }
+    if (!hasValidGeminiKey()) {
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
     const activity = day.activities[safeActivityIndex];
     const reasonSafe = sanitizeText(reason, 180);
@@ -1115,13 +1113,12 @@ app.post('/api/replan-day', originGuard, writeApiLimiter, async (req, res) => {
     if (!itinerary || !Array.isArray(itinerary.days) || !Number.isInteger(safeDayIndex)) {
       return res.status(400).json({ success: false, error: 'Missing required fields for replan day.' });
     }
-    if (!hasValidGeminiKey()) {
-      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
-    }
-
     const day = itinerary.days[safeDayIndex];
     if (!day) {
       return res.status(400).json({ success: false, error: 'Invalid day index for replan day.' });
+    }
+    if (!hasValidGeminiKey()) {
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
     const reasonSafe = sanitizeText(reason, 220);
     const destination = day.city || day.activities?.[0]?.location || 'the destination';
@@ -1295,9 +1292,6 @@ app.post('/api/apply-constraints', originGuard, writeApiLimiter, async (req, res
 
 app.post('/api/replan-segment', originGuard, writeApiLimiter, async (req, res) => {
   try {
-    if (!hasValidGeminiKey()) {
-      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
-    }
     const { itinerary, dayIndex, startActivityIndex, endActivityIndex, reason, constraints = {} } = req.body;
     const safeDayIndex = Number(dayIndex);
     const safeStartIndex = Number(startActivityIndex);
@@ -1308,6 +1302,9 @@ app.post('/api/replan-segment', originGuard, writeApiLimiter, async (req, res) =
     const day = itinerary.days[safeDayIndex];
     if (!day || !Array.isArray(day.activities) || safeStartIndex < 0 || safeEndIndex < safeStartIndex || safeEndIndex >= day.activities.length) {
       return res.status(400).json({ success: false, error: 'Invalid segment indexes for replan.' });
+    }
+    if (!hasValidGeminiKey()) {
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
     const reasonSafe = sanitizeText(reason, 220);
     const before = day.activities.slice(0, safeStartIndex).map((a) => sanitizeText(a.title, 80)).join(', ');
