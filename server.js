@@ -28,6 +28,53 @@ function formatApiError(error, fallbackMessage) {
   return fallbackMessage;
 }
 
+function buildFallbackItinerary({ destination, startDate, budget }) {
+  const city = destination || 'Your Destination';
+  const d0 = new Date(startDate || Date.now());
+  const day2 = new Date(d0);
+  day2.setDate(d0.getDate() + 1);
+  const total = Number(budget) || 800;
+  const slot = Math.max(20, Math.floor(total / 8));
+
+  return {
+    tripTitle: `${city} Quick Explorer`,
+    summary: `Generated in fallback mode for ${city}. Add GEMINI_API_KEY anytime for fully personalized AI results.`,
+    totalEstimatedCost: slot * 8,
+    currency: 'USD',
+    tips: [
+      'Start early to reduce queues.',
+      'Keep buffer time between places.',
+      'Pre-check opening hours.',
+      'Use public transport in peak areas.',
+      'Keep offline map downloaded.'
+    ],
+    days: [
+      {
+        day: 1,
+        date: d0.toISOString().split('T')[0],
+        theme: `Highlights of ${city}`,
+        activities: [
+          { time: '09:00 AM', title: 'Historic Core Walk', description: 'Explore key landmarks and old streets.', location: `${city} Old Town`, lat: 28.6139, lng: 77.2090, duration: '2 hours', estimatedCost: slot, category: 'culture' },
+          { time: '12:30 PM', title: 'Local Lunch', description: 'Taste popular local dishes.', location: `${city} Central Market`, lat: 28.6129, lng: 77.2295, duration: '1.5 hours', estimatedCost: slot, category: 'food' },
+          { time: '03:00 PM', title: 'Main Attraction', description: 'Visit one iconic place in the city.', location: `${city} Landmark Plaza`, lat: 28.6120, lng: 77.2310, duration: '2 hours', estimatedCost: slot, category: 'sightseeing' },
+          { time: '07:00 PM', title: 'Evening Promenade', description: 'Relax with sunset and city lights.', location: `${city} Riverside`, lat: 28.6070, lng: 77.2420, duration: '1.5 hours', estimatedCost: slot, category: 'relaxation' }
+        ]
+      },
+      {
+        day: 2,
+        date: day2.toISOString().split('T')[0],
+        theme: `Culture & Food in ${city}`,
+        activities: [
+          { time: '09:30 AM', title: 'Museum Stop', description: 'Discover local history and arts.', location: `${city} Museum District`, lat: 28.6110, lng: 77.2190, duration: '2 hours', estimatedCost: slot, category: 'culture' },
+          { time: '01:00 PM', title: 'Street Food Trail', description: 'Curated tasting across local stalls.', location: `${city} Bazaar Lane`, lat: 28.6500, lng: 77.2300, duration: '2 hours', estimatedCost: slot, category: 'food' },
+          { time: '04:00 PM', title: 'Craft Market', description: 'Buy handcrafted souvenirs.', location: `${city} Craft Market`, lat: 28.6320, lng: 77.2170, duration: '1.5 hours', estimatedCost: slot, category: 'shopping' },
+          { time: '08:00 PM', title: 'Cultural Evening', description: 'Local performance or live arts.', location: `${city} Cultural Center`, lat: 28.6200, lng: 77.2080, duration: '2 hours', estimatedCost: slot, category: 'culture' }
+        ]
+      }
+    ]
+  };
+}
+
 const ITINERARY_SCHEMA = {
   required: ['tripTitle', 'summary', 'totalEstimatedCost', 'days'],
   dayRequired: ['day', 'activities'],
@@ -180,10 +227,10 @@ app.post('/api/generate-itinerary', async (req, res) => {
     }
 
     if (!hasValidGeminiKey()) {
-      return res.status(500).json({
-        success: false,
-        error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.'
-      });
+      const itinerary = enrichWithBookingLinks(
+        buildFallbackItinerary({ destination, startDate, budget })
+      );
+      return res.json({ success: true, itinerary, fallbackMode: true });
     }
 
     const prompt = `${BASE_PROMPT}
@@ -218,10 +265,21 @@ app.post('/api/replan-activity', async (req, res) => {
     }
 
     if (!hasValidGeminiKey()) {
-      return res.status(500).json({
-        success: false,
-        error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.'
-      });
+      const day = itinerary.days[dayIndex];
+      const activity = day.activities[activityIndex];
+      const replacement = {
+        ...activity,
+        title: `Alternative: ${activity.title}`,
+        description: `Fallback replacement${reason ? ` (${reason})` : ''}. Add GEMINI_API_KEY for AI replacement.`
+      };
+      const query = encodeURIComponent(`${replacement.title} ${replacement.location}`);
+      replacement.bookingLinks = {
+        googleMaps: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(replacement.location)}`,
+        googleSearch: `https://www.google.com/search?q=${query}+booking`,
+        mapsDirection: replacement.lat && replacement.lng ? `https://www.google.com/maps/dir/?api=1&destination=${replacement.lat},${replacement.lng}` : null
+      };
+      itinerary.days[dayIndex].activities[activityIndex] = replacement;
+      return res.json({ success: true, itinerary, fallbackMode: true });
     }
 
     const day = itinerary.days[dayIndex];
@@ -286,10 +344,16 @@ app.post('/api/replan-day', async (req, res) => {
   try {
     const { itinerary, dayIndex, reason } = req.body;
     if (!hasValidGeminiKey()) {
-      return res.status(500).json({
-        success: false,
-        error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.'
-      });
+      const first = itinerary.days[dayIndex]?.activities?.[0];
+      const city = first?.location || 'Your Destination';
+      const budget = itinerary.totalEstimatedCost || 800;
+      const fallback = enrichWithBookingLinks(buildFallbackItinerary({
+        destination: city,
+        startDate: itinerary.days[dayIndex]?.date,
+        budget
+      }));
+      itinerary.days[dayIndex] = fallback.days[0];
+      return res.json({ success: true, itinerary, fallbackMode: true });
     }
     const day = itinerary.days[dayIndex];
     const destination = day.activities[0]?.location || 'the destination';
