@@ -4,6 +4,7 @@ let directionsRenderer = null;
 const ACTIVITIES_PER_PAGE = 5;
 const dayActivityPage = {};
 let replanInFlight = false;
+let routeInFlight = false;
 const userPreferences = {
   fromPlace: '',
   toPlace: '',
@@ -658,38 +659,133 @@ function getTravelModeForMaps() {
   return google.maps.TravelMode.DRIVING;
 }
 
-function startRoute(dayIndex) {
+function routeStatusMessage(status) {
+  if (status === 'MAX_WAYPOINTS_EXCEEDED') return 'Too many stops for a single route. Showing a shorter route.';
+  if (status === 'ZERO_RESULTS') return 'No route found for this travel mode between selected places.';
+  if (status === 'NOT_FOUND') return 'One or more route locations could not be identified.';
+  if (status === 'OVER_QUERY_LIMIT') return 'Maps quota reached. Try again in a few seconds.';
+  if (status === 'REQUEST_DENIED') return 'Maps request denied. Check API restrictions and enabled APIs.';
+  if (status === 'INVALID_REQUEST') return 'Invalid route request for selected travel mode.';
+  if (status === 'UNKNOWN_ERROR') return 'Temporary Maps error. Please retry.';
+  return `Route failed: ${status || 'UNKNOWN'}`;
+}
+
+function normalizeRoutePoints(points, maxTotalPoints = 25) {
+  const unique = [];
+  const seen = new Set();
+  points.forEach((p) => {
+    if (!p) return;
+    const key = `${Number(p.lat).toFixed(6)},${Number(p.lng).toFixed(6)}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    unique.push(p);
+  });
+  if (unique.length > maxTotalPoints) return unique.slice(0, maxTotalPoints);
+  return unique;
+}
+
+function requestDirectionsRoute(request) {
+  return new Promise((resolve, reject) => {
+    directionsService.route(request, (result, status) => {
+      if (status === 'OK' && result) {
+        resolve(result);
+        return;
+      }
+      const err = new Error(routeStatusMessage(status));
+      err.status = status || 'UNKNOWN_ERROR';
+      reject(err);
+    });
+  });
+}
+
+function buildRouteRequest(points, travelMode, includeWaypoints) {
+  const request = {
+    origin: points[0],
+    destination: points[points.length - 1],
+    travelMode
+  };
+  if (includeWaypoints) {
+    request.waypoints = points.slice(1, -1).map((p) => ({ location: p, stopover: true }));
+    request.optimizeWaypoints = false;
+  }
+  return request;
+}
+
+async function startRoute(dayIndex) {
   if (!mapsReady || !gMap || !directionsService || !directionsRenderer) {
     showToast('Map is not ready yet.');
+    return;
+  }
+  if (routeInFlight) {
+    showToast('Route is already being generated. Please wait.');
     return;
   }
   const day = itineraryData?.days?.[dayIndex];
   if (!day) return;
 
-  const points = (day.activities || [])
+  const rawPoints = (day.activities || [])
     .filter(act => !act.discarded)
     .map(toLatLng)
     .filter(Boolean);
+  const points = normalizeRoutePoints(rawPoints, 25);
+
+  if (rawPoints.length > points.length) {
+    showToast('Removed duplicate/extra stops to build a valid route.', 'success');
+  }
 
   if (points.length < 2) {
     showToast('Need at least 2 valid locations to draw route.');
     return;
   }
 
-  const waypoints = points.slice(1, -1).map(p => ({ location: p, stopover: true }));
-  directionsService.route({
-    origin: points[0],
-    destination: points[points.length - 1],
-    waypoints,
-    optimizeWaypoints: false,
-    travelMode: getTravelModeForMaps() || google.maps.TravelMode.DRIVING
-  }, (result, status) => {
-    if (status === 'OK' && result) {
-      directionsRenderer.setDirections(result);
-    } else {
-      showToast(`Route failed: ${status}`);
+  const preferredMode = getTravelModeForMaps() || google.maps.TravelMode.DRIVING;
+  const hasWaypoints = points.length > 2;
+  const candidates = [];
+
+  // Transit does not support multi-waypoint itinerary requests in DirectionsService.
+  if (preferredMode === google.maps.TravelMode.TRANSIT) {
+    candidates.push({
+      label: 'transit direct',
+      request: buildRouteRequest(points, google.maps.TravelMode.TRANSIT, false)
+    });
+    candidates.push({
+      label: 'driving full itinerary',
+      request: buildRouteRequest(points, google.maps.TravelMode.DRIVING, hasWaypoints)
+    });
+  } else {
+    candidates.push({
+      label: `${String(preferredMode).toLowerCase()} full itinerary`,
+      request: buildRouteRequest(points, preferredMode, hasWaypoints)
+    });
+    if (preferredMode !== google.maps.TravelMode.DRIVING) {
+      candidates.push({
+        label: 'driving full itinerary',
+        request: buildRouteRequest(points, google.maps.TravelMode.DRIVING, hasWaypoints)
+      });
     }
-  });
+  }
+
+  routeInFlight = true;
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidate = candidates[i];
+    try {
+      const result = await requestDirectionsRoute(candidate.request);
+      directionsRenderer.setDirections(result);
+      if (i > 0) {
+        showToast(`Using fallback route: ${candidate.label}.`, 'success');
+      } else {
+        showToast('Route generated.', 'success');
+      }
+      routeInFlight = false;
+      return;
+    } catch (err) {
+      console.warn('Route candidate failed:', candidate.label, err?.status || err?.message);
+      if (i === candidates.length - 1) {
+        showToast(err?.message || 'Failed to draw route.');
+      }
+    }
+  }
+  routeInFlight = false;
 }
 
 // Back button
