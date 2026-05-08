@@ -5,6 +5,7 @@ const express = require('express');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const nodemailer = require('nodemailer');
+const { jsonrepair } = require('jsonrepair');
 const {
   normalizeCityName,
   sanitizeStops,
@@ -278,7 +279,7 @@ function getModel() {
     model: 'gemini-2.5-flash-lite',
     generationConfig: {
       temperature: 0.5,
-      maxOutputTokens: 1400,
+      maxOutputTokens: 4096,
       responseMimeType: 'application/json'
     }
   });
@@ -434,6 +435,29 @@ function validateItinerary(data) {
   return errors;
 }
 
+function tryCloseTruncatedJson(text) {
+  let inString = false;
+  let escaped = false;
+  let brace = 0;
+  let bracket = 0;
+  for (const ch of text) {
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\') { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (!inString) {
+      if (ch === '{') brace += 1;
+      else if (ch === '}') brace -= 1;
+      else if (ch === '[') bracket += 1;
+      else if (ch === ']') bracket -= 1;
+    }
+  }
+  let repaired = text;
+  if (inString) repaired += '"';
+  if (bracket > 0) repaired += ']'.repeat(bracket);
+  if (brace > 0) repaired += '}'.repeat(brace);
+  return repaired;
+}
+
 function cleanAndParseJSON(text) {
   let cleaned = (text || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
   if (!cleaned) throw new Error('Empty AI response');
@@ -442,39 +466,16 @@ function cleanAndParseJSON(text) {
   if (jsonStart !== -1 && jsonEnd !== -1) {
     cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
   }
-  try {
-    return JSON.parse(cleaned);
-  } catch (e) {
-    // Try lightweight repair for truncated LLM JSON.
-    let inString = false;
-    let escaped = false;
-    let brace = 0;
-    let bracket = 0;
-    for (const ch of cleaned) {
-      if (escaped) {
-        escaped = false;
-        continue;
-      }
-      if (ch === '\\') {
-        escaped = true;
-        continue;
-      }
-      if (ch === '"') {
-        inString = !inString;
-        continue;
-      }
-      if (!inString) {
-        if (ch === '{') brace += 1;
-        if (ch === '}') brace -= 1;
-        if (ch === '[') bracket += 1;
-        if (ch === ']') bracket -= 1;
-      }
-    }
-    let repaired = cleaned;
-    if (inString) repaired += '"';
-    if (bracket > 0) repaired += ']'.repeat(bracket);
-    if (brace > 0) repaired += '}'.repeat(brace);
-    return JSON.parse(repaired);
+  // 1. Fast path: parse as-is.
+  try { return JSON.parse(cleaned); } catch {}
+  // 2. Truncation repair: close unclosed strings/arrays/objects.
+  try { return JSON.parse(tryCloseTruncatedJson(cleaned)); } catch {}
+  // 3. Last resort: jsonrepair handles trailing commas, missing commas,
+  //    unescaped quotes, smart quotes, single-quoted strings, etc.
+  try { return JSON.parse(jsonrepair(cleaned)); } catch (finalErr) {
+    const preview = cleaned.length > 200 ? cleaned.slice(0, 200) + '…' : cleaned;
+    console.error('JSON parse failed after all repairs:', finalErr.message, '| preview:', preview);
+    throw new Error('AI returned malformed JSON that could not be repaired.');
   }
 }
 
