@@ -1,4 +1,6 @@
 let map, markers = [], itineraryData = null, currentDayIndex = 0, mapsReady = false;
+const ACTIVITIES_PER_PAGE = 5;
+const dayActivityPage = {};
 
 // Set default dates
 document.addEventListener('DOMContentLoaded', () => {
@@ -222,6 +224,7 @@ function showDay(index, data) {
   });
 
   const day = data.days[index];
+  if (!dayActivityPage[index]) dayActivityPage[index] = 1;
   const content = document.getElementById('itinerary-content');
   content.innerHTML = '';
 
@@ -235,7 +238,16 @@ function showDay(index, data) {
       <button class="btn-replan-day" onclick="replanDay(${index})">🔄 Replan Day</button>
     </div>`;
 
-  (day.activities || []).forEach((act, ai) => {
+  const activities = day.activities || [];
+  const totalPages = Math.max(1, Math.ceil(activities.length / ACTIVITIES_PER_PAGE));
+  if (dayActivityPage[index] > totalPages) dayActivityPage[index] = totalPages;
+  const page = dayActivityPage[index];
+  const start = (page - 1) * ACTIVITIES_PER_PAGE;
+  const end = start + ACTIVITIES_PER_PAGE;
+  const pageActivities = activities.slice(start, end);
+
+  pageActivities.forEach((act, localAi) => {
+    const ai = start + localAi;
     const cat = (act.category || '').toLowerCase();
     const card = document.createElement('div');
     card.className = `activity-card glass-card cat-${cat}`;
@@ -270,8 +282,26 @@ function showDay(index, data) {
     section.appendChild(card);
   });
 
+  if (totalPages > 1) {
+    const pagination = document.createElement('div');
+    pagination.className = 'activity-pagination';
+    const prevDisabled = page <= 1 ? 'disabled' : '';
+    const nextDisabled = page >= totalPages ? 'disabled' : '';
+    pagination.innerHTML = `
+      <button class="btn-secondary pagination-btn" ${prevDisabled} onclick="changeActivityPage(${index}, -1)">← Prev</button>
+      <span class="pagination-label">Page ${page} / ${totalPages}</span>
+      <button class="btn-secondary pagination-btn" ${nextDisabled} onclick="changeActivityPage(${index}, 1)">Next →</button>
+    `;
+    section.appendChild(pagination);
+  }
+
   content.appendChild(section);
   if (mapsReady) highlightDayOnMap(day);
+}
+
+function changeActivityPage(dayIndex, delta) {
+  dayActivityPage[dayIndex] = Math.max(1, (dayActivityPage[dayIndex] || 1) + delta);
+  showDay(dayIndex, itineraryData);
 }
 
 // Replan activity

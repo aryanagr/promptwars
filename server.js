@@ -65,6 +65,14 @@ function formatApiError(error, fallbackMessage) {
   return fallbackMessage;
 }
 
+function withTimeout(promise, ms, message) {
+  let timeoutId;
+  const timeoutPromise = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
+}
+
 function itineraryToEmailHtml(itinerary) {
   const daysHtml = (itinerary.days || []).map(day => {
     const acts = (day.activities || []).map(act => (
@@ -267,7 +275,11 @@ async function generateWithRetry(prompt, maxRetries = 2) {
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
-      const result = await model.generateContent(prompt);
+      const result = await withTimeout(
+        model.generateContent(prompt),
+        25000,
+        'AI is taking too long to respond. Please try again.'
+      );
       const response = await result.response;
       const text = response.text();
       const itinerary = cleanAndParseJSON(text);
@@ -371,7 +383,11 @@ Return ONLY a single JSON object for the replacement activity (no markdown, no c
   "category": "sightseeing|food|adventure|culture|shopping|transport|relaxation"
 }`;
 
-    const result = await model.generateContent(prompt);
+    const result = await withTimeout(
+      model.generateContent(prompt),
+      20000,
+      'AI is taking too long to respond. Please try again.'
+    );
     const text = result.response.text();
     const newActivity = cleanAndParseJSON(text);
 
@@ -408,7 +424,11 @@ app.post('/api/replan-day', async (req, res) => {
     const prompt = `${BASE_PROMPT}\n\nREPLAN REQUEST: Replace ALL activities for Day ${day.day} (${day.date || ''}).\n${reason ? `Reason: ${reason}` : ''}\nDestination area: ${destination}\nAVOID these places (already in other days): ${otherDaysPlaces}\nKeep the same date and day number. Return ONLY the single day object as JSON.\n\nReturn format:\n{\n  "day": ${day.day},\n  "date": "${day.date || ''}",\n  "theme": "New theme",\n  "activities": [ ... ]\n}`;
 
     const model = getModel();
-    const result = await model.generateContent(prompt);
+    const result = await withTimeout(
+      model.generateContent(prompt),
+      25000,
+      'AI is taking too long to respond. Please try again.'
+    );
     const text = result.response.text();
     const newDay = cleanAndParseJSON(text);
 
@@ -561,7 +581,11 @@ app.post('/api/replan-segment', async (req, res) => {
     const prompt = `Replan a segment of a day itinerary.\n\nDay context: ${day.theme || `Day ${day.day}`} (${day.date || ''})\nReason: ${reason || 'Improve fit'}\nKeep activities before segment unchanged: ${before || 'none'}\nKeep activities after segment unchanged: ${after || 'none'}\nSegment length must be exactly ${segmentSize} activities.\nSegment budget should stay near $${slotBudget}.\nMax travel minutes per hop: ${constraints.maxTravelMinutesPerHop || 90}.\n\nReturn ONLY JSON:\n{\n  "activities": [\n    {\n      "time": "09:00 AM",\n      "title": "Activity name",\n      "description": "Brief description",\n      "location": "Full place name and area",\n      "lat": 0.0,\n      "lng": 0.0,\n      "duration": "2 hours",\n      "estimatedCost": 0,\n      "category": "sightseeing|food|adventure|culture|shopping|transport|relaxation"\n    }\n  ]\n}`;
 
     const model = getModel();
-    const result = await model.generateContent(prompt);
+    const result = await withTimeout(
+      model.generateContent(prompt),
+      25000,
+      'AI is taking too long to respond. Please try again.'
+    );
     const parsed = cleanAndParseJSON(result.response.text());
     const newSeg = parsed.activities;
     if (!Array.isArray(newSeg) || newSeg.length !== segmentSize) {
