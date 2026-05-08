@@ -131,6 +131,25 @@ function isPlaceholderSecret(value) {
   );
 }
 
+let memoizedTransporter = null;
+let memoizedTransporterFingerprint = null;
+
+// Reuse the SMTP transporter across requests; rebuild only on config change.
+function getMailTransporter(cfg) {
+  const fingerprint = `${cfg.host}:${cfg.port}:${cfg.secure}:${cfg.user}`;
+  if (memoizedTransporter && memoizedTransporterFingerprint === fingerprint) return memoizedTransporter;
+  memoizedTransporter = nodemailer.createTransport({
+    host: cfg.host,
+    port: cfg.port,
+    secure: cfg.secure,
+    pool: true,
+    maxConnections: 3,
+    auth: { user: cfg.user, pass: cfg.pass }
+  });
+  memoizedTransporterFingerprint = fingerprint;
+  return memoizedTransporter;
+}
+
 function missingMailerFields() {
   const cfg = getMailerConfig();
   const missing = [];
@@ -175,11 +194,11 @@ function getAllowedOrigins() {
 
 const CSP_DIRECTIVES = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://maps.googleapis.com https://maps.gstatic.com",
+  "script-src 'self' 'unsafe-inline' https://maps.googleapis.com https://maps.gstatic.com https://www.googletagmanager.com https://www.google-analytics.com",
   "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "font-src 'self' https://fonts.gstatic.com data:",
-  "img-src 'self' data: blob: https://maps.googleapis.com https://maps.gstatic.com https://*.googleusercontent.com",
-  "connect-src 'self' https://maps.googleapis.com https://maps.gstatic.com https://places.googleapis.com https://routes.googleapis.com",
+  "img-src 'self' data: blob: https://maps.googleapis.com https://maps.gstatic.com https://*.googleusercontent.com https://www.google-analytics.com https://www.googletagmanager.com",
+  "connect-src 'self' https://maps.googleapis.com https://maps.gstatic.com https://places.googleapis.com https://routes.googleapis.com https://www.google-analytics.com https://*.google-analytics.com https://www.googletagmanager.com",
   "frame-src 'self' https://www.google.com",
   "frame-ancestors 'none'",
   "base-uri 'self'",
@@ -282,7 +301,7 @@ function getCachedItinerary(cacheKey) {
     itineraryCache.delete(cacheKey);
     return null;
   }
-  return JSON.parse(JSON.stringify(entry.value));
+  return structuredClone(entry.value);
 }
 
 function setCachedItinerary(cacheKey, itinerary) {
@@ -291,7 +310,7 @@ function setCachedItinerary(cacheKey, itinerary) {
   if (itineraryCache.has(cacheKey)) itineraryCache.delete(cacheKey);
   itineraryCache.set(cacheKey, {
     expiresAt: Date.now() + itineraryCacheTtlMs,
-    value: JSON.parse(JSON.stringify(itinerary))
+    value: structuredClone(itinerary)
   });
   while (itineraryCache.size > itineraryCacheMaxEntries) {
     const oldestKey = itineraryCache.keys().next().value;
@@ -357,15 +376,28 @@ app.use((req, res, next) => {
 });
 app.use(express.static('public'));
 
+// === Structured logger (Cloud Logging on GCP, console fallback) ===
+
+const log = {
+  info: (msg, meta = {}) => console.log(JSON.stringify({ severity: 'INFO', message: msg, ...meta })),
+  warn: (msg, meta = {}) => console.warn(JSON.stringify({ severity: 'WARNING', message: msg, ...meta })),
+  error: (msg, meta = {}) => console.error(JSON.stringify({ severity: 'ERROR', message: msg, ...meta }))
+};
+
 // === Gemini client + JSON repair + retry/timeout ===
 
+let memoizedModel = null;
+let memoizedModelKey = null;
+
+// Reuse the GenerativeModel across requests; rebuild only if the key changes.
 function getModel() {
   const key = getGeminiApiKey();
   if (!hasValidGeminiKey()) {
     throw new Error('GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).');
   }
+  if (memoizedModel && memoizedModelKey === key) return memoizedModel;
   const genAI = new GoogleGenerativeAI(key);
-  return genAI.getGenerativeModel({
+  memoizedModel = genAI.getGenerativeModel({
     model: 'gemini-2.5-flash-lite',
     generationConfig: {
       temperature: 0.5,
@@ -373,6 +405,8 @@ function getModel() {
       responseMimeType: 'application/json'
     }
   });
+  memoizedModelKey = key;
+  return memoizedModel;
 }
 
 const exposeErrorDetails = ['true', '1', 'on'].includes(
@@ -405,9 +439,11 @@ function itineraryToEmailHtml(itinerary) {
       const cost = Number(act.estimatedCost || 0);
       return `<li><strong>${escapeHtml(act.time || '')}</strong> - ${escapeHtml(act.title || 'Activity')} (${escapeHtml(act.location || '')}) | ${escapeHtml(act.duration || '')} | $${Number.isFinite(cost) ? cost : 0}</li>`;
     }).join('');
+    const mapUrl = buildStaticMapUrl(day.activities);
+    const mapImg = mapUrl ? `<p><img src="${escapeHtml(mapUrl)}" alt="Day ${escapeHtml(String(day.day || ''))} route" style="max-width:100%;border-radius:8px;border:1px solid #ddd;"></p>` : '';
     const dayNum = Number(day.day) || '';
     const dayDate = day.date ? ` - ${escapeHtml(day.date)}` : '';
-    return `<h3>Day ${dayNum}${dayDate}</h3><p><strong>${escapeHtml(day.theme || '')}</strong></p><ul>${acts}</ul>`;
+    return `<h3>Day ${dayNum}${dayDate}</h3><p><strong>${escapeHtml(day.theme || '')}</strong></p>${mapImg}<ul>${acts}</ul>`;
   }).join('');
 
   const tips = (Array.isArray(itinerary.tips) ? itinerary.tips : []).map(t => `<li>${escapeHtml(t)}</li>`).join('');
@@ -497,6 +533,57 @@ async function computeRouteMinutes(origin, destination, travelMode = 'DRIVE') {
   if (!route?.duration) return { travelMinutes: null, distanceMeters: null };
   const seconds = Number(String(route.duration).replace('s', ''));
   return { travelMinutes: Math.round(seconds / 60), distanceMeters: route.distanceMeters || null };
+}
+
+// Resolve a free-text city name to lat/lng + formatted address via Geocoding API.
+async function geocodeAddress(address) {
+  const key = getMapsApiKeyServer();
+  const url = `https://maps.googleapis.com/maps/api/geocode/json?address=${encodeURIComponent(address)}&key=${key}`;
+  const resp = await fetch(url);
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Geocoding failed (${resp.status}): ${txt}`);
+  }
+  const data = await resp.json();
+  if (data.status !== 'OK' || !data.results?.length) return null;
+  const r = data.results[0];
+  return {
+    formattedAddress: r.formatted_address,
+    lat: r.geometry?.location?.lat,
+    lng: r.geometry?.location?.lng,
+    placeId: r.place_id,
+    types: r.types || []
+  };
+}
+
+// Run async tasks with bounded concurrency. Preserves order in the results array.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const i = cursor++;
+      try { results[i] = await fn(items[i], i); }
+      catch (err) { results[i] = { __error: err }; }
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+// Build a Google Static Maps URL with up to N markers numbered by visit order.
+function buildStaticMapUrl(activities, { width = 600, height = 320 } = {}) {
+  const key = getMapsApiKeyServer();
+  if (!key) return null;
+  const points = (activities || [])
+    .map((a) => ({ lat: Number(a.lat), lng: Number(a.lng), title: a.title }))
+    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lng));
+  if (points.length === 0) return null;
+  const markers = points
+    .slice(0, 10)
+    .map((p, i) => `markers=color:red%7Clabel:${i + 1}%7C${p.lat},${p.lng}`)
+    .join('&');
+  return `https://maps.googleapis.com/maps/api/staticmap?size=${width}x${height}&scale=2&${markers}&key=${encodeURIComponent(key)}`;
 }
 
 // === Itinerary shape validation (warnings only, not enforced) ===
@@ -678,17 +765,44 @@ app.get('/api/maps-key', (req, res) => {
   res.json({ key: getMapsApiKeyClient() });
 });
 
+const APP_VERSION = require('./package.json').version;
+const APP_START_TIME = Date.now();
+
 app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
     runtime: isCloudRun ? 'cloud-run' : 'local',
+    version: APP_VERSION,
+    uptimeSeconds: Math.round((Date.now() - APP_START_TIME) / 1000),
     geminiConfigured: hasValidGeminiKey(),
     mapsConfigured: hasValidMapsKey(),
     mailerConfigured: hasValidMailerConfig(),
     corsRestricted: allowedOrigins.length > 0,
     itineraryCacheTtlMs: itineraryCacheTtlMs,
-    geminiModel: 'gemini-2.5-flash-lite'
+    itineraryCacheSize: itineraryCache.size,
+    geminiModel: 'gemini-2.5-flash-lite',
+    analyticsId: envValue('GA_MEASUREMENT_ID') || null
   });
+});
+
+// Frontend reads this for Google Analytics auto-bootstrap.
+app.get('/api/analytics-config', (req, res) => {
+  res.json({ measurementId: envValue('GA_MEASUREMENT_ID') || null });
+});
+
+// Resolve free-text place name to lat/lng via Geocoding API.
+app.post('/api/geocode', originGuard, writeApiLimiter, async (req, res) => {
+  try {
+    if (!hasValidMapsKey()) return res.status(500).json({ success: false, error: 'GOOGLE_MAPS_API_KEY is not configured.' });
+    const address = sanitizeText(req.body?.address, 200);
+    if (!address) return res.status(400).json({ success: false, error: 'address is required.' });
+    const result = await geocodeAddress(address);
+    if (!result) return res.json({ success: true, found: false });
+    res.json({ success: true, found: true, ...result });
+  } catch (error) {
+    log.error('geocode failed', { error: error?.message });
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to geocode address') });
+  }
 });
 
 app.post('/api/generate-itinerary', originGuard, writeApiLimiter, async (req, res) => {
@@ -920,25 +1034,29 @@ app.post('/api/validate-places', originGuard, writeApiLimiter, async (req, res) 
 
     let validatedCount = 0;
     let unresolvedCount = 0;
-    for (const day of itinerary.days) {
-      for (const act of day.activities || []) {
-        const place = await placesTextSearch(`${sanitizeText(act.location || act.title, 120)} ${destinationSafe}`.trim());
-        if (place?.location) {
-          act.placeId = place.id;
-          act.location = place.formattedAddress || act.location;
-          act.lat = place.location.latitude;
-          act.lng = place.location.longitude;
-          act.verified = true;
-          act.openNow = place.regularOpeningHours?.openNow ?? null;
-          act.rating = place.rating ?? null;
-          act.mapsUri = place.googleMapsUri || null;
-          validatedCount += 1;
-        } else {
-          act.verified = false;
-          unresolvedCount += 1;
-        }
+    // Flatten so we can parallelize across days while still mutating in place.
+    const allActs = itinerary.days.flatMap((day) => Array.isArray(day.activities) ? day.activities : []);
+    const concurrency = Number(envValue('PLACES_CONCURRENCY') || 5);
+    const lookups = await mapWithConcurrency(allActs, concurrency, (act) =>
+      placesTextSearch(`${sanitizeText(act.location || act.title, 120)} ${destinationSafe}`.trim())
+    );
+    allActs.forEach((act, i) => {
+      const place = lookups[i] && !lookups[i].__error ? lookups[i] : null;
+      if (place?.location) {
+        act.placeId = place.id;
+        act.location = place.formattedAddress || act.location;
+        act.lat = place.location.latitude;
+        act.lng = place.location.longitude;
+        act.verified = true;
+        act.openNow = place.regularOpeningHours?.openNow ?? null;
+        act.rating = place.rating ?? null;
+        act.mapsUri = place.googleMapsUri || null;
+        validatedCount += 1;
+      } else {
+        act.verified = false;
+        unresolvedCount += 1;
       }
-    }
+    });
     const enriched = enrichWithBookingLinks(itinerary);
     res.json({ success: true, itinerary: enriched, validatedCount, unresolvedCount });
   } catch (error) {
@@ -959,23 +1077,28 @@ app.post('/api/compute-routes', originGuard, writeApiLimiter, async (req, res) =
       return res.status(400).json({ success: false, error: 'Itinerary too large for route computation.' });
     }
 
+    // Build hop list across all days, fetch in parallel, then assign back.
+    const hops = [];
     for (const day of itinerary.days) {
       const acts = day.activities || [];
       for (let i = 1; i < acts.length; i++) {
         const prev = acts[i - 1];
         const cur = acts[i];
-        if (prev?.lat && prev?.lng && cur?.lat && cur?.lng) {
-          const route = await computeRouteMinutes(
-            { lat: prev.lat, lng: prev.lng },
-            { lat: cur.lat, lng: cur.lng },
-            safeTravelMode
-          );
-          cur.travelFromPrevious = route;
+        if (Number.isFinite(prev?.lat) && Number.isFinite(prev?.lng) && Number.isFinite(cur?.lat) && Number.isFinite(cur?.lng)) {
+          hops.push({ cur, prev });
         } else {
           cur.travelFromPrevious = { travelMinutes: null, distanceMeters: null };
         }
       }
     }
+    const concurrency = Number(envValue('ROUTES_CONCURRENCY') || 5);
+    const results = await mapWithConcurrency(hops, concurrency, ({ prev, cur }) =>
+      computeRouteMinutes({ lat: prev.lat, lng: prev.lng }, { lat: cur.lat, lng: cur.lng }, safeTravelMode)
+    );
+    hops.forEach((hop, i) => {
+      const r = results[i];
+      hop.cur.travelFromPrevious = r && !r.__error ? r : { travelMinutes: null, distanceMeters: null };
+    });
     res.json({ success: true, itinerary });
   } catch (error) {
     res.status(500).json({ success: false, error: formatApiError(error, 'Failed to compute routes') });
@@ -1101,12 +1224,7 @@ app.post('/api/email-itinerary', originGuard, writeApiLimiter, async (req, res) 
     }
 
     const cfg = getMailerConfig();
-    const transporter = nodemailer.createTransport({
-      host: cfg.host,
-      port: cfg.port,
-      secure: cfg.secure,
-      auth: { user: cfg.user, pass: cfg.pass }
-    });
+    const transporter = getMailTransporter(cfg);
 
     const safeTitle = sanitizeText(itinerary.tripTitle || 'Trip Plan', 160);
     const safeSummary = sanitizeText(itinerary.summary || '', 500);
@@ -1131,9 +1249,24 @@ app.post('/api/email-itinerary', originGuard, writeApiLimiter, async (req, res) 
 });
 
 if (require.main === module) {
-  app.listen(PORT, () => {
+  const server = app.listen(PORT, () => {
+    log.info('server.start', { port: PORT, version: APP_VERSION, runtime: isCloudRun ? 'cloud-run' : 'local' });
     console.log(`Travel Planner running at http://localhost:${PORT}`);
   });
+
+  // Graceful shutdown: stop accepting new connections, drain in-flight, exit.
+  const shutdown = (signal) => {
+    log.info('server.shutdown', { signal });
+    server.close(() => {
+      if (memoizedTransporter && typeof memoizedTransporter.close === 'function') memoizedTransporter.close();
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(1), 10000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('unhandledRejection', (reason) => log.error('unhandledRejection', { reason: String(reason) }));
+  process.on('uncaughtException', (err) => log.error('uncaughtException', { error: err?.message, stack: err?.stack }));
 }
 
-module.exports = { app };
+module.exports = { app, _internals: { cleanAndParseJSON, validateItinerary, buildItineraryCacheKey, escapeHtml } };

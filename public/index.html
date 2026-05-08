@@ -54,8 +54,42 @@
     ]
   }
   </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "FAQPage",
+    "mainEntity": [
+      {
+        "@type": "Question",
+        "name": "How does TravelAI generate an itinerary?",
+        "acceptedAnswer": { "@type": "Answer", "text": "TravelAI uses Google Gemini to plan day-by-day activities based on your destination, dates, budget, travelers, and interests, then enriches the result with Google Maps places and routes." }
+      },
+      {
+        "@type": "Question",
+        "name": "Can I plan a multi-city trip?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Yes — add intermediate stop cities and how many days to spend in each. TravelAI allocates the schedule across stops and the destination." }
+      },
+      {
+        "@type": "Question",
+        "name": "Is TravelAI free to use?",
+        "acceptedAnswer": { "@type": "Answer", "text": "Yes. The web app is free; you only need to provide your own Google Gemini and Google Maps API keys when self-hosting." }
+      }
+    ]
+  }
+  </script>
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      { "@type": "ListItem", "position": 1, "name": "Home", "item": "https://travelai.app/" }
+    ]
+  }
+  </script>
 </head>
 <body>
+  <a href="#main-content" class="skip-link">Skip to main content</a>
+  <main id="main-content">
   <section id="hero">
     <div class="hero-bg-orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div></div>
     <nav id="navbar">
@@ -166,6 +200,8 @@
     </div>
   </section>
 
+  </main>
+
   <div id="reason-modal" class="reason-modal hidden" aria-hidden="true">
     <div class="reason-modal-card glass-card">
       <h3 id="reason-modal-title">Why do you want to change this?</h3>
@@ -180,5 +216,21 @@
 
   <footer><p>Built with ❤️ using <strong>Gemini AI</strong> & <strong>Google Maps</strong> | PromptWars 2026</p></footer>
   <script src="script.js?v=20260508-7"></script>
+  <script>
+    // Lazy-load Google Analytics (gtag) only when the server reports a measurement ID.
+    fetch('/api/analytics-config').then(r => r.ok ? r.json() : null).then(cfg => {
+      const id = cfg && cfg.measurementId;
+      if (!id) return;
+      const s = document.createElement('script');
+      s.async = true;
+      s.src = 'https://www.googletagmanager.com/gtag/js?id=' + encodeURIComponent(id);
+      document.head.appendChild(s);
+      window.dataLayer = window.dataLayer || [];
+      function gtag(){ window.dataLayer.push(arguments); }
+      window.gtag = gtag;
+      gtag('js', new Date());
+      gtag('config', id, { anonymize_ip: true });
+    }).catch(() => {});
+  </script>
 </body>
 </html>

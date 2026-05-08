@@ -507,14 +507,35 @@ function renderResults(data) {
   document.getElementById('stat-cost').textContent = '$' + (data.totalEstimatedCost || 0);
   updateSummaryStats();
 
-  // Day tabs
+  // Day tabs (WAI-ARIA tabs pattern with arrow-key navigation)
   const tabsEl = document.getElementById('day-tabs');
   tabsEl.innerHTML = '';
+  tabsEl.setAttribute('role', 'tablist');
+  tabsEl.setAttribute('aria-label', 'Trip days');
   data.days.forEach((day, i) => {
     const tab = document.createElement('button');
+    tab.type = 'button';
+    tab.id = `day-tab-${i}`;
     tab.className = 'day-tab' + (i === 0 ? ' active' : '');
     tab.textContent = 'Day ' + day.day;
-    tab.onclick = () => showDay(i, data);
+    tab.setAttribute('role', 'tab');
+    tab.setAttribute('aria-selected', String(i === 0));
+    tab.setAttribute('tabindex', i === 0 ? '0' : '-1');
+    tab.addEventListener('click', () => showDay(i, data));
+    tab.addEventListener('keydown', (e) => {
+      const total = data.days.length;
+      let next = null;
+      if (e.key === 'ArrowRight') next = (i + 1) % total;
+      else if (e.key === 'ArrowLeft') next = (i - 1 + total) % total;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = total - 1;
+      if (next !== null) {
+        e.preventDefault();
+        showDay(next, data);
+        const target = document.getElementById(`day-tab-${next}`);
+        if (target) target.focus();
+      }
+    });
     tabsEl.appendChild(tab);
   });
 
@@ -542,6 +563,8 @@ function showDay(index, data) {
   currentDayIndex = index;
   document.querySelectorAll('.day-tab').forEach((t, i) => {
     t.classList.toggle('active', i === index);
+    t.setAttribute('aria-selected', String(i === index));
+    t.setAttribute('tabindex', i === index ? '0' : '-1');
   });
 
   const day = data.days[index];
