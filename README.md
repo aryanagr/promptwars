@@ -27,8 +27,15 @@ Create a `.env` file in the project root:
 ```env
 GEMINI_API_KEY=your_gemini_api_key
 GOOGLE_MAPS_API_KEY=your_google_maps_api_key
+SMTP_HOST=smtp.gmail.com
+SMTP_PORT=587
+SMTP_USER=your_email@gmail.com
+SMTP_PASS=your_app_password
+MAIL_FROM=TravelAI <your_email@gmail.com>
 PORT=3000
 ```
+
+Mail aliases supported: `SMTP_*` or `MAIL_*` or `EMAIL_*`.
 
 ## Run Locally
 ```bash

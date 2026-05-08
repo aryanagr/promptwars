@@ -52,13 +52,24 @@ function getMapsApiKey() {
 }
 
 function getMailerConfig() {
+  const host = envValue('SMTP_HOST', 'MAIL_HOST', 'EMAIL_HOST');
+  const portRaw = envValue('SMTP_PORT', 'MAIL_PORT', 'EMAIL_PORT');
+  const port = Number(portRaw || 587);
+  const secureRaw = envValue('SMTP_SECURE', 'MAIL_SECURE', 'EMAIL_SECURE');
+  const secure = secureRaw
+    ? String(secureRaw).toLowerCase() === 'true'
+    : port === 465;
+  const user = envValue('SMTP_USER', 'SMTP_USERNAME', 'MAIL_USER', 'EMAIL_USER');
+  const pass = envValue('SMTP_PASS', 'SMTP_PASSWORD', 'MAIL_PASS', 'EMAIL_PASS');
+  const from = envValue('MAIL_FROM', 'SMTP_FROM', 'EMAIL_FROM') || user;
+
   return {
-    host: envValue('SMTP_HOST'),
-    port: Number(envValue('SMTP_PORT') || 587),
-    secure: String(envValue('SMTP_SECURE') || 'false').toLowerCase() === 'true',
-    user: envValue('SMTP_USER'),
-    pass: envValue('SMTP_PASS'),
-    from: envValue('MAIL_FROM') || envValue('SMTP_USER')
+    host,
+    port,
+    secure,
+    user,
+    pass,
+    from
   };
 }
 
@@ -74,7 +85,38 @@ function hasValidMapsKey() {
 
 function hasValidMailerConfig() {
   const cfg = getMailerConfig();
-  return Boolean(cfg.host && cfg.port && cfg.user && cfg.pass && cfg.from);
+  return Boolean(
+    cfg.host &&
+    Number.isFinite(cfg.port) &&
+    cfg.port > 0 &&
+    cfg.user &&
+    cfg.pass &&
+    cfg.from &&
+    !isPlaceholderSecret(cfg.pass)
+  );
+}
+
+function isPlaceholderSecret(value) {
+  const v = String(value || '').toLowerCase();
+  if (!v) return true;
+  return (
+    v.includes('replace_with') ||
+    v.includes('your_') ||
+    v.includes('password_here') ||
+    v.includes('app_password_here') ||
+    v.includes('changeme')
+  );
+}
+
+function missingMailerFields() {
+  const cfg = getMailerConfig();
+  const missing = [];
+  if (!cfg.host) missing.push('SMTP_HOST');
+  if (!Number.isFinite(cfg.port) || cfg.port <= 0) missing.push('SMTP_PORT');
+  if (!cfg.user) missing.push('SMTP_USER');
+  if (!cfg.pass || isPlaceholderSecret(cfg.pass)) missing.push('SMTP_PASS');
+  if (!cfg.from) missing.push('MAIL_FROM');
+  return missing;
 }
 
 function getModel() {
@@ -360,7 +402,7 @@ async function generateWithRetry(prompt, maxRetries = 1) {
 }
 
 app.get('/api/maps-key', (req, res) => {
-  res.json({ key: process.env.GOOGLE_MAPS_API_KEY });
+  res.json({ key: getMapsApiKey() });
 });
 
 app.get('/api/health', (req, res) => {
@@ -368,7 +410,8 @@ app.get('/api/health', (req, res) => {
     ok: true,
     runtime: isCloudRun ? 'cloud-run' : 'local',
     geminiConfigured: hasValidGeminiKey(),
-    mapsConfigured: hasValidMapsKey()
+    mapsConfigured: hasValidMapsKey(),
+    mailerConfigured: hasValidMailerConfig()
   });
 });
 
@@ -672,9 +715,10 @@ app.post('/api/replan-segment', async (req, res) => {
 app.post('/api/email-itinerary', async (req, res) => {
   try {
     if (!hasValidMailerConfig()) {
+      const missing = missingMailerFields();
       return res.status(500).json({
         success: false,
-        error: 'Mail service is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_FROM.'
+        error: `Mail service is not configured. Missing: ${missing.join(', ')}. Set SMTP_* (or MAIL_*/EMAIL_* aliases).`
       });
     }
     const { toEmail, itinerary } = req.body;

@@ -19,10 +19,26 @@ document.addEventListener('DOMContentLoaded', () => {
   nextWeek.setDate(today.getDate() + 3);
   document.getElementById('start-date').value = formatDate(today);
   document.getElementById('end-date').value = formatDate(nextWeek);
+  refreshServiceAvailability();
 });
 
 function formatDate(d) {
   return d.toISOString().split('T')[0];
+}
+
+async function refreshServiceAvailability() {
+  const emailBtn = document.getElementById('email-btn');
+  if (!emailBtn) return;
+  try {
+    const res = await fetch('/api/health', { cache: 'no-store' });
+    if (!res.ok) return;
+    const data = await res.json();
+    const mailEnabled = Boolean(data?.mailerConfigured);
+    emailBtn.disabled = !mailEnabled;
+    emailBtn.title = mailEnabled ? '' : 'Email disabled: configure SMTP env vars on the server.';
+  } catch {
+    // Ignore health-check failures here to avoid blocking itinerary UX.
+  }
 }
 
 // Form submission
