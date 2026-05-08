@@ -9,6 +9,9 @@ AI-powered travel itinerary generator built for hackathon prototyping with Googl
 - Multi-city planning with intermediate stops and day allocation per stop
 - Interactive Google Map with activity markers
 - Day tabs, timeline cards, and travel tips UI
+- Request rate limiting + secure response headers
+- Short-lived itinerary caching for repeated requests
+- Basic automated tests for city/day planning logic
 
 ## Tech Stack
 - Node.js + Express
@@ -23,7 +26,13 @@ AI-powered travel itinerary generator built for hackathon prototyping with Googl
 - `public/script.js` - frontend logic and maps rendering
 
 ## Environment Variables
-Create a `.env` file in the project root:
+Create a `.env` file in the project root (you can copy from `.env.example`):
+
+```bash
+cp .env.example .env
+```
+
+Then update values:
 
 ```env
 GEMINI_API_KEY=your_gemini_api_key
@@ -33,6 +42,10 @@ SMTP_PORT=587
 SMTP_USER=your_email@gmail.com
 SMTP_PASS=your_app_password
 MAIL_FROM=TravelAI <your_email@gmail.com>
+CORS_ORIGINS=https://yourdomain.com,https://www.yourdomain.com
+API_RATE_LIMIT_WINDOW_MS=60000
+API_RATE_LIMIT_MAX=30
+ITINERARY_CACHE_TTL_MS=180000
 PORT=3000
 ```
 
@@ -45,6 +58,11 @@ npm run dev
 ```
 
 Open: `http://localhost:3000`
+
+## Run Tests
+```bash
+npm test
+```
 
 ## API Endpoints
 - `GET /api/maps-key` - returns Google Maps API key to frontend

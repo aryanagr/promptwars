@@ -43,8 +43,8 @@ function createStopRow(city = '', days = 1) {
   const row = document.createElement('div');
   row.className = 'stop-row';
   row.innerHTML = `
-    <input type="text" class="stop-city" data-field="city" placeholder="e.g. Udaipur, India" value="${city}">
-    <input type="number" class="stop-days" data-field="days" min="1" max="30" step="1" value="${days}">
+    <input type="text" class="stop-city" data-field="city" placeholder="e.g. Udaipur, India" value="${city}" aria-label="Intermediate stop city">
+    <input type="number" class="stop-days" data-field="days" min="1" max="30" step="1" value="${days}" aria-label="Days in this stop city">
     <button type="button" class="btn-secondary stop-remove-btn" aria-label="Remove stop">✖</button>
   `;
   const removeBtn = row.querySelector('.stop-remove-btn');
@@ -138,6 +138,7 @@ async function refreshServiceAvailability() {
     const data = await res.json();
     const mailEnabled = Boolean(data?.mailerConfigured);
     emailBtn.disabled = !mailEnabled;
+    emailBtn.setAttribute('aria-disabled', String(!mailEnabled));
     emailBtn.title = mailEnabled ? '' : 'Email disabled: configure SMTP env vars on the server.';
   } catch {
     // Ignore health-check failures here to avoid blocking itinerary UX.
@@ -209,6 +210,7 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
   btn.disabled = true;
   document.getElementById('hero').style.display = 'none';
   document.getElementById('loading-section').style.display = 'flex';
+  document.getElementById('loading-section').setAttribute('aria-busy', 'true');
   animateLoadingSteps();
 
   // Timeout controller - 60 second max
@@ -260,8 +262,12 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
 });
 
 function showToast(msg, type = 'error') {
+  const announcer = document.getElementById('sr-announcer');
+  if (announcer) announcer.textContent = msg;
   const toast = document.createElement('div');
   toast.className = `error-toast${type === 'success' ? ' success' : ''}`;
+  toast.setAttribute('role', type === 'success' ? 'status' : 'alert');
+  toast.setAttribute('aria-live', type === 'success' ? 'polite' : 'assertive');
   toast.innerHTML = `${type === 'success' ? '✅' : '⚠️'} ${msg}`;
   document.body.appendChild(toast);
   setTimeout(() => { toast.classList.add('show'); }, 10);
@@ -270,6 +276,7 @@ function showToast(msg, type = 'error') {
 
 function showFatalError(msg) {
   document.getElementById('loading-section').style.display = 'none';
+  document.getElementById('loading-section').setAttribute('aria-busy', 'false');
   document.getElementById('hero').style.display = 'flex';
   document.getElementById('results-section').style.display = 'none';
   const btn = document.getElementById('generate-btn');
@@ -341,6 +348,7 @@ function askReason(titleText) {
 function resetForm() {
   document.getElementById('hero').style.display = 'flex';
   document.getElementById('loading-section').style.display = 'none';
+  document.getElementById('loading-section').setAttribute('aria-busy', 'false');
   document.getElementById('results-section').style.display = 'none';
   const btn = document.getElementById('generate-btn');
   btn.querySelector('.btn-text').style.display = 'inline';
@@ -424,6 +432,7 @@ function toLatLng(activity) {
 function renderResults(data) {
   if (window._loadingInterval) clearInterval(window._loadingInterval);
   document.getElementById('loading-section').style.display = 'none';
+  document.getElementById('loading-section').setAttribute('aria-busy', 'false');
   document.getElementById('results-section').style.display = 'block';
 
   document.getElementById('trip-title').textContent = data.tripTitle || 'Your Trip';

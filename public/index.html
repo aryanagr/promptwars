@@ -7,7 +7,7 @@
   <title>TravelAI — Smart Travel Planner</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=20260508-6">
+  <link rel="stylesheet" href="style.css?v=20260508-7">
 </head>
 <body>
   <section id="hero">
@@ -82,7 +82,7 @@
     </div>
   </section>
 
-  <section id="loading-section" style="display:none;">
+  <section id="loading-section" style="display:none;" aria-live="polite" aria-busy="true">
     <div class="loading-content">
       <div class="loading-animation"><div class="plane-path">✈️</div></div>
       <h2>Creating Your Perfect Itinerary</h2>
@@ -130,8 +130,9 @@
       </div>
     </div>
   </div>
+  <div id="sr-announcer" class="sr-only" aria-live="assertive" aria-atomic="true"></div>
 
   <footer><p>Built with ❤️ using <strong>Gemini AI</strong> & <strong>Google Maps</strong> | PromptWars 2026</p></footer>
-  <script src="script.js?v=20260508-6"></script>
+  <script src="script.js?v=20260508-7"></script>
 </body>
 </html>

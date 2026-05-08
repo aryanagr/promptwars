@@ -1,9 +1,16 @@
 const fs = require('fs');
+const crypto = require('crypto');
 const dotenv = require('dotenv');
 const express = require('express');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const nodemailer = require('nodemailer');
+const {
+  normalizeCityName,
+  sanitizeStops,
+  buildCityPlan,
+  applyCityPlanToItinerary
+} = require('./lib/trip-planner-utils');
 
 const isCloudRun = Boolean(process.env.K_SERVICE);
 if (!isCloudRun) {
@@ -12,16 +19,8 @@ if (!isCloudRun) {
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
-app.use(cors());
-app.use(express.json());
-app.use((req, res, next) => {
-  if (req.path.endsWith('.js') || req.path.endsWith('.css')) {
-    res.setHeader('Cache-Control', 'no-store');
-  }
-  next();
-});
-app.use(express.static('public'));
+app.disable('x-powered-by');
+app.set('trust proxy', true);
 
 function readFromFileEnv(name) {
   const filePath = process.env[`${name}_FILE`];
@@ -118,6 +117,132 @@ function missingMailerFields() {
   if (!cfg.from) missing.push('MAIL_FROM');
   return missing;
 }
+
+function sanitizeText(value, maxLen = 160) {
+  return String(value || '')
+    .replace(/[\u0000-\u001F\u007F]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLen);
+}
+
+function sanitizeInterests(value) {
+  return sanitizeText(value, 300);
+}
+
+function getAllowedOrigins() {
+  const raw = envValue('CORS_ORIGINS', 'CORS_ORIGIN');
+  if (!raw) return [];
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function securityHeadersMiddleware(req, res, next) {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'DENY');
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
+  const forwardedProto = req.headers['x-forwarded-proto'];
+  const isHttps = req.secure || String(forwardedProto || '').includes('https');
+  if (isHttps) {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  }
+  next();
+}
+
+function createRateLimiter({ windowMs, maxRequests }) {
+  const buckets = new Map();
+  return (req, res, next) => {
+    const now = Date.now();
+    const key = `${req.ip || 'unknown'}:${req.path}`;
+    const existing = buckets.get(key);
+    if (!existing || now >= existing.resetAt) {
+      buckets.set(key, { count: 1, resetAt: now + windowMs });
+      return next();
+    }
+    existing.count += 1;
+    if (existing.count > maxRequests) {
+      const retryAfterSeconds = Math.max(1, Math.ceil((existing.resetAt - now) / 1000));
+      res.setHeader('Retry-After', String(retryAfterSeconds));
+      return res.status(429).json({ success: false, error: 'Too many requests. Please slow down and retry shortly.' });
+    }
+    if (buckets.size > 5000) {
+      for (const [bucketKey, bucketValue] of buckets.entries()) {
+        if (now >= bucketValue.resetAt) buckets.delete(bucketKey);
+      }
+    }
+    return next();
+  };
+}
+
+const writeApiLimiter = createRateLimiter({
+  windowMs: Number(envValue('API_RATE_LIMIT_WINDOW_MS') || 60000),
+  maxRequests: Number(envValue('API_RATE_LIMIT_MAX') || 30)
+});
+
+const itineraryCache = new Map();
+const itineraryCacheTtlMs = Number(envValue('ITINERARY_CACHE_TTL_MS') || 180000);
+
+function stableStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(value[k])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function buildItineraryCacheKey(payload) {
+  const normalized = {
+    fromPlace: normalizeCityName(payload.fromPlace),
+    toPlace: normalizeCityName(payload.toPlace),
+    destination: normalizeCityName(payload.destination),
+    startDate: payload.startDate,
+    endDate: payload.endDate,
+    budget: Number(payload.budget || 0),
+    travelers: Number(payload.travelers || 1),
+    interests: sanitizeInterests(payload.interests),
+    transportMode: sanitizeText(payload.transportMode || 'driving', 20).toLowerCase(),
+    transportBookingRequired: Boolean(payload.transportBookingRequired),
+    stops: sanitizeStops(payload.stops).map((s) => ({ city: normalizeCityName(s.city), days: Number(s.days) }))
+  };
+  return crypto.createHash('sha256').update(stableStringify(normalized)).digest('hex');
+}
+
+function getCachedItinerary(cacheKey) {
+  const entry = itineraryCache.get(cacheKey);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    itineraryCache.delete(cacheKey);
+    return null;
+  }
+  return JSON.parse(JSON.stringify(entry.value));
+}
+
+function setCachedItinerary(cacheKey, itinerary) {
+  itineraryCache.set(cacheKey, {
+    expiresAt: Date.now() + itineraryCacheTtlMs,
+    value: JSON.parse(JSON.stringify(itinerary))
+  });
+}
+
+const allowedOrigins = getAllowedOrigins();
+app.use(cors(allowedOrigins.length === 0 ? {} : {
+  origin(origin, callback) {
+    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    return callback(null, false);
+  }
+}));
+app.use(express.json({ limit: envValue('JSON_BODY_LIMIT') || '250kb' }));
+app.use(securityHeadersMiddleware);
+app.use((req, res, next) => {
+  if (req.path.endsWith('.js') || req.path.endsWith('.css')) {
+    res.setHeader('Cache-Control', 'no-store');
+  }
+  next();
+});
+app.use(express.static('public'));
 
 function getModel() {
   const key = getGeminiApiKey();
@@ -402,134 +527,6 @@ async function generateWithRetry(prompt, maxRetries = 1) {
   throw lastError;
 }
 
-function normalizeCityName(value) {
-  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
-}
-
-function parseDateInputUtc(dateText) {
-  if (!dateText || typeof dateText !== 'string') return null;
-  const parts = dateText.split('-').map(Number);
-  if (parts.length !== 3) return null;
-  const [year, month, day] = parts;
-  if (!year || !month || !day) return null;
-  const date = new Date(Date.UTC(year, month - 1, day));
-  if (Number.isNaN(date.getTime())) return null;
-  return date;
-}
-
-function toYmdUtc(dateObj) {
-  return dateObj.toISOString().slice(0, 10);
-}
-
-function buildInclusiveDates(startDate, endDate) {
-  const start = parseDateInputUtc(startDate);
-  const end = parseDateInputUtc(endDate);
-  if (!start || !end || end < start) return [];
-  const dates = [];
-  const cursor = new Date(start);
-  while (cursor <= end) {
-    dates.push(toYmdUtc(cursor));
-    cursor.setUTCDate(cursor.getUTCDate() + 1);
-  }
-  return dates;
-}
-
-function sanitizeStops(stops) {
-  if (!Array.isArray(stops)) return [];
-  return stops.map((stop) => ({
-    city: String(stop?.city || '').trim().replace(/\s+/g, ' '),
-    days: Number(stop?.days)
-  })).filter((stop) => stop.city);
-}
-
-function buildCityPlan({ destination, startDate, endDate, stops }) {
-  const dates = buildInclusiveDates(startDate, endDate);
-  if (!dates.length) {
-    throw new Error('Invalid date range. End date must be after or equal to start date.');
-  }
-
-  const sanitizedStops = sanitizeStops(stops);
-  const normalizedDestination = normalizeCityName(destination);
-  const seen = new Set();
-  let stopDaysTotal = 0;
-  const cleanStops = [];
-
-  for (let i = 0; i < sanitizedStops.length; i += 1) {
-    const stop = sanitizedStops[i];
-    const normalizedStop = normalizeCityName(stop.city);
-    if (normalizedStop === normalizedDestination) {
-      throw new Error(`Stop city "${stop.city}" cannot be same as destination city.`);
-    }
-    if (seen.has(normalizedStop)) {
-      throw new Error(`Duplicate stop city: ${stop.city}`);
-    }
-    seen.add(normalizedStop);
-    if (!Number.isInteger(stop.days) || stop.days < 1) {
-      throw new Error(`Stop city "${stop.city}" must have at least 1 day.`);
-    }
-    cleanStops.push(stop);
-    stopDaysTotal += stop.days;
-  }
-
-  if (cleanStops.length > 0 && stopDaysTotal >= dates.length) {
-    throw new Error('Intermediate stop days are too high. Keep at least 1 day for destination city.');
-  }
-
-  const destinationDays = dates.length - stopDaysTotal;
-  if (destinationDays < 1) {
-    throw new Error('Destination city must have at least 1 day.');
-  }
-
-  const cityDayPlan = [];
-  let pointer = 0;
-  cleanStops.forEach((stop) => {
-    for (let i = 0; i < stop.days; i += 1) {
-      cityDayPlan.push({ day: pointer + 1, date: dates[pointer], city: stop.city });
-      pointer += 1;
-    }
-  });
-  for (let i = 0; i < destinationDays; i += 1) {
-    cityDayPlan.push({ day: pointer + 1, date: dates[pointer], city: destination });
-    pointer += 1;
-  }
-
-  return {
-    totalDays: dates.length,
-    dates,
-    stops: cleanStops,
-    destinationDays,
-    cityDayPlan
-  };
-}
-
-function applyCityPlanToItinerary(itinerary, cityPlan) {
-  if (!Array.isArray(itinerary?.days)) {
-    throw new Error('AI response missing day list.');
-  }
-  if (itinerary.days.length > cityPlan.totalDays) {
-    itinerary.days = itinerary.days.slice(0, cityPlan.totalDays);
-  }
-  if (itinerary.days.length < cityPlan.totalDays) {
-    for (let i = itinerary.days.length; i < cityPlan.totalDays; i += 1) {
-      const plan = cityPlan.cityDayPlan[i];
-      itinerary.days.push({
-        day: plan.day,
-        date: plan.date,
-        city: plan.city,
-        theme: `${plan.city} flexible day`,
-        activities: []
-      });
-    }
-  }
-  itinerary.days.forEach((day, idx) => {
-    const plan = cityPlan.cityDayPlan[idx];
-    day.day = plan.day;
-    day.date = plan.date;
-    day.city = plan.city;
-  });
-  return itinerary;
-}
-
 app.get('/api/maps-key', (req, res) => {
   res.json({ key: getMapsApiKey() });
 });
@@ -540,11 +537,14 @@ app.get('/api/health', (req, res) => {
     runtime: isCloudRun ? 'cloud-run' : 'local',
     geminiConfigured: hasValidGeminiKey(),
     mapsConfigured: hasValidMapsKey(),
-    mailerConfigured: hasValidMailerConfig()
+    mailerConfigured: hasValidMailerConfig(),
+    corsRestricted: allowedOrigins.length > 0,
+    itineraryCacheTtlMs: itineraryCacheTtlMs,
+    geminiModel: 'gemini-2.5-flash-lite'
   });
 });
 
-app.post('/api/generate-itinerary', async (req, res) => {
+app.post('/api/generate-itinerary', writeApiLimiter, async (req, res) => {
   try {
     const {
       fromPlace,
@@ -560,12 +560,23 @@ app.post('/api/generate-itinerary', async (req, res) => {
       stops
     } = req.body;
 
-    const fromCity = String(fromPlace || '').trim();
-    const toCity = String(toPlace || '').trim();
-    const destinationCity = String(destination || toCity).trim();
+    const fromCity = sanitizeText(fromPlace, 100);
+    const toCity = sanitizeText(toPlace, 100);
+    const destinationCity = sanitizeText(destination || toCity, 100);
+    const startDateSafe = sanitizeText(startDate, 12);
+    const endDateSafe = sanitizeText(endDate, 12);
+    const budgetValue = Number(budget);
+    const travelersValue = Number(travelers || 1);
+    const interestsSafe = sanitizeInterests(interests || 'General sightseeing, local food, culture');
+    const transportModeSafe = sanitizeText(transportMode || 'driving', 20).toLowerCase();
+    const bookingRequired = Boolean(transportBookingRequired);
+    const stopsSafe = sanitizeStops(stops);
 
-    if (!toCity || !destinationCity || !startDate || !endDate || !budget) {
+    if (!toCity || !destinationCity || !startDateSafe || !endDateSafe || !Number.isFinite(budgetValue) || budgetValue <= 0) {
       return res.status(400).json({ success: false, error: 'Missing required fields. To, Destination, dates, and budget are required.' });
+    }
+    if (!Number.isFinite(travelersValue) || travelersValue < 1 || travelersValue > 20) {
+      return res.status(400).json({ success: false, error: 'Travelers must be between 1 and 20.' });
     }
 
     if (normalizeCityName(toCity) !== normalizeCityName(destinationCity)) {
@@ -580,13 +591,32 @@ app.post('/api/generate-itinerary', async (req, res) => {
     try {
       cityPlan = buildCityPlan({
         destination: destinationCity,
-        startDate,
-        endDate,
-        stops
+        startDate: startDateSafe,
+        endDate: endDateSafe,
+        stops: stopsSafe
       });
     } catch (validationError) {
       return res.status(400).json({ success: false, error: validationError.message || 'Invalid multi-city input.' });
     }
+
+    const cacheKey = buildItineraryCacheKey({
+      fromPlace: fromCity,
+      toPlace: toCity,
+      destination: destinationCity,
+      startDate: startDateSafe,
+      endDate: endDateSafe,
+      budget: budgetValue,
+      travelers: travelersValue,
+      interests: interestsSafe,
+      transportMode: transportModeSafe,
+      transportBookingRequired: bookingRequired,
+      stops: stopsSafe
+    });
+    const cachedItinerary = getCachedItinerary(cacheKey);
+    if (cachedItinerary) {
+      return res.json({ success: true, itinerary: cachedItinerary, cached: true });
+    }
+
     const stopsText = cityPlan.stops.length > 0
       ? cityPlan.stops.map((s, i) => `${i + 1}. ${s.city} - ${s.days} day(s)`).join('\n')
       : 'none';
@@ -594,11 +624,12 @@ app.post('/api/generate-itinerary', async (req, res) => {
       .map((d) => `Day ${d.day} (${d.date}): ${d.city}`)
       .join('\n');
 
-    const prompt = `${BASE_PROMPT}\n\nTRIP DETAILS:\n- From (optional): ${fromCity || 'not provided'}\n- To (final city): ${toCity}\n- Destination city (must match To): ${destinationCity}\n- Start Date: ${startDate}\n- End Date: ${endDate}\n- Total Days: ${cityPlan.totalDays}\n- Intermediate Stops:\n${stopsText}\n- City-Day Plan (must follow exactly):\n${cityDaySchedule}\n- Budget: $${budget} USD total\n- Number of Travelers: ${travelers || 1}\n- Interests: ${interests || 'General sightseeing, local food, culture'}\n- Preferred Transport Mode: ${transportMode || 'driving'}\n- Need Transport Booking Options: ${transportBookingRequired ? 'yes' : 'no'}\n\nHard constraints:\n- Return exactly ${cityPlan.totalDays} day objects.\n- Each day object must include city and match the city-day plan exactly.\n- Do not put Jaipur activities on a Bangalore day or vice versa.\n- Keep all activities for each day inside that day's city.\n- If day city changes from previous day, include one transport activity first (category: transport).\n- Also include practical movement between activities considering the preferred transport mode.`;
+    const prompt = `${BASE_PROMPT}\n\nTRIP DETAILS:\n- From (optional): ${fromCity || 'not provided'}\n- To (final city): ${toCity}\n- Destination city (must match To): ${destinationCity}\n- Start Date: ${startDateSafe}\n- End Date: ${endDateSafe}\n- Total Days: ${cityPlan.totalDays}\n- Intermediate Stops:\n${stopsText}\n- City-Day Plan (must follow exactly):\n${cityDaySchedule}\n- Budget: $${budgetValue} USD total\n- Number of Travelers: ${travelersValue}\n- Interests: ${interestsSafe}\n- Preferred Transport Mode: ${transportModeSafe}\n- Need Transport Booking Options: ${bookingRequired ? 'yes' : 'no'}\n\nHard constraints:\n- Return exactly ${cityPlan.totalDays} day objects.\n- Each day object must include city and match the city-day plan exactly.\n- Do not put Jaipur activities on a Bangalore day or vice versa.\n- Keep all activities for each day inside that day's city.\n- If day city changes from previous day, include one transport activity first (category: transport).\n- Also include practical movement between activities considering the preferred transport mode.`;
 
     const itineraryRaw = await generateWithRetry(prompt);
     const itinerary = applyCityPlanToItinerary(itineraryRaw, cityPlan);
     const enriched = enrichWithBookingLinks(itinerary);
+    setCachedItinerary(cacheKey, enriched);
     res.json({ success: true, itinerary: enriched });
   } catch (error) {
     console.error('Error generating itinerary:', error);
@@ -606,10 +637,12 @@ app.post('/api/generate-itinerary', async (req, res) => {
   }
 });
 
-app.post('/api/replan-activity', async (req, res) => {
+app.post('/api/replan-activity', writeApiLimiter, async (req, res) => {
   try {
     const { itinerary, dayIndex, activityIndex, reason } = req.body;
-    if (!itinerary || dayIndex === undefined || activityIndex === undefined) {
+    const safeDayIndex = Number(dayIndex);
+    const safeActivityIndex = Number(activityIndex);
+    if (!itinerary || !Array.isArray(itinerary.days) || !Number.isInteger(safeDayIndex) || !Number.isInteger(safeActivityIndex)) {
       return res.status(400).json({ success: false, error: 'Missing required fields for replan.' });
     }
 
@@ -617,12 +650,16 @@ app.post('/api/replan-activity', async (req, res) => {
       return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
 
-    const day = itinerary.days[dayIndex];
-    const activity = day.activities[activityIndex];
+    const day = itinerary.days[safeDayIndex];
+    if (!day || !Array.isArray(day.activities) || !day.activities[safeActivityIndex]) {
+      return res.status(400).json({ success: false, error: 'Invalid day/activity index for replan.' });
+    }
+    const activity = day.activities[safeActivityIndex];
+    const reasonSafe = sanitizeText(reason, 180);
 
     const otherActivities = day.activities
-      .filter((_, i) => i !== activityIndex)
-      .map(a => a.title)
+      .filter((_, i) => i !== safeActivityIndex)
+      .map((a) => sanitizeText(a.title, 80))
       .join(', ');
 
     const model = getModel();
@@ -632,8 +669,8 @@ CURRENT ACTIVITY TO REPLACE:
 - Title: ${activity.title}
 - Time: ${activity.time}
 - Location: ${activity.location}
-- Category: ${activity.category}
-${reason ? `- Reason for change: ${reason}` : ''}
+- Category: ${sanitizeText(activity.category, 30)}
+${reasonSafe ? `- Reason for change: ${reasonSafe}` : ''}
 
 OTHER ACTIVITIES THAT DAY (avoid duplicates): ${otherActivities}
 DESTINATION: The same area/city as ${activity.location}
@@ -667,7 +704,7 @@ Return ONLY a single JSON object for the replacement activity (no markdown, no c
       mapsDirection: newActivity.lat && newActivity.lng ? `https://www.google.com/maps/dir/?api=1&destination=${newActivity.lat},${newActivity.lng}` : null
     };
 
-    itinerary.days[dayIndex].activities[activityIndex] = newActivity;
+    itinerary.days[safeDayIndex].activities[safeActivityIndex] = newActivity;
     res.json({ success: true, itinerary, replacedActivity: activity, newActivity });
   } catch (error) {
     console.error('Error replanning:', error);
@@ -675,14 +712,22 @@ Return ONLY a single JSON object for the replacement activity (no markdown, no c
   }
 });
 
-app.post('/api/replan-day', async (req, res) => {
+app.post('/api/replan-day', writeApiLimiter, async (req, res) => {
   try {
     const { itinerary, dayIndex, reason } = req.body;
+    const safeDayIndex = Number(dayIndex);
+    if (!itinerary || !Array.isArray(itinerary.days) || !Number.isInteger(safeDayIndex)) {
+      return res.status(400).json({ success: false, error: 'Missing required fields for replan day.' });
+    }
     if (!hasValidGeminiKey()) {
       return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
 
-    const day = itinerary.days[dayIndex];
+    const day = itinerary.days[safeDayIndex];
+    if (!day) {
+      return res.status(400).json({ success: false, error: 'Invalid day index for replan day.' });
+    }
+    const reasonSafe = sanitizeText(reason, 220);
     const destination = day.city || day.activities[0]?.location || 'the destination';
 
     const otherDaysPlaces = itinerary.days
@@ -690,7 +735,7 @@ app.post('/api/replan-day', async (req, res) => {
       .flatMap(d => d.activities.map(a => a.title))
       .join(', ');
 
-    const prompt = `${BASE_PROMPT}\n\nREPLAN REQUEST: Replace ALL activities for Day ${day.day} (${day.date || ''}).\n${reason ? `Reason: ${reason}` : ''}\nDestination area: ${destination}\nAVOID these places (already in other days): ${otherDaysPlaces}\nKeep the same date, day number, and city. Return ONLY the single day object as JSON.\n\nReturn format:\n{\n  "day": ${day.day},\n  "date": "${day.date || ''}",\n  "city": "${day.city || destination}",\n  "theme": "New theme",\n  "activities": [ ... ]\n}`;
+    const prompt = `${BASE_PROMPT}\n\nREPLAN REQUEST: Replace ALL activities for Day ${day.day} (${day.date || ''}).\n${reasonSafe ? `Reason: ${reasonSafe}` : ''}\nDestination area: ${destination}\nAVOID these places (already in other days): ${otherDaysPlaces}\nKeep the same date, day number, and city. Return ONLY the single day object as JSON.\n\nReturn format:\n{\n  "day": ${day.day},\n  "date": "${day.date || ''}",\n  "city": "${day.city || destination}",\n  "theme": "New theme",\n  "activities": [ ... ]\n}`;
 
     const model = getModel();
     const result = await withTimeout(
@@ -702,7 +747,7 @@ app.post('/api/replan-day', async (req, res) => {
     const newDay = cleanAndParseJSON(text);
 
     newDay.city = newDay.city || day.city || destination;
-    itinerary.days[dayIndex] = newDay;
+    itinerary.days[safeDayIndex] = newDay;
     const enriched = enrichWithBookingLinks(itinerary);
 
     res.json({ success: true, itinerary: enriched });
@@ -712,19 +757,24 @@ app.post('/api/replan-day', async (req, res) => {
   }
 });
 
-app.post('/api/validate-places', async (req, res) => {
+app.post('/api/validate-places', writeApiLimiter, async (req, res) => {
   try {
     if (!hasValidMapsKey()) {
       return res.status(500).json({ success: false, error: 'GOOGLE_MAPS_API_KEY is not configured.' });
     }
     const { itinerary, destination } = req.body;
     if (!itinerary?.days) return res.status(400).json({ success: false, error: 'Missing itinerary.' });
+    const destinationSafe = sanitizeText(destination, 100);
+    const totalActivities = itinerary.days.reduce((sum, day) => sum + (Array.isArray(day.activities) ? day.activities.length : 0), 0);
+    if (totalActivities > 120) {
+      return res.status(400).json({ success: false, error: 'Itinerary too large for place validation.' });
+    }
 
     let validatedCount = 0;
     let unresolvedCount = 0;
     for (const day of itinerary.days) {
       for (const act of day.activities || []) {
-        const place = await placesTextSearch(`${act.location || act.title} ${destination || ''}`.trim());
+        const place = await placesTextSearch(`${sanitizeText(act.location || act.title, 120)} ${destinationSafe}`.trim());
         if (place?.location) {
           act.placeId = place.id;
           act.location = place.formattedAddress || act.location;
@@ -748,13 +798,18 @@ app.post('/api/validate-places', async (req, res) => {
   }
 });
 
-app.post('/api/compute-routes', async (req, res) => {
+app.post('/api/compute-routes', writeApiLimiter, async (req, res) => {
   try {
     if (!hasValidMapsKey()) {
       return res.status(500).json({ success: false, error: 'GOOGLE_MAPS_API_KEY is not configured.' });
     }
     const { itinerary, travelMode } = req.body;
     if (!itinerary?.days) return res.status(400).json({ success: false, error: 'Missing itinerary.' });
+    const safeTravelMode = sanitizeText(travelMode || 'DRIVE', 20).toUpperCase();
+    const totalActivities = itinerary.days.reduce((sum, day) => sum + (Array.isArray(day.activities) ? day.activities.length : 0), 0);
+    if (totalActivities > 150) {
+      return res.status(400).json({ success: false, error: 'Itinerary too large for route computation.' });
+    }
 
     for (const day of itinerary.days) {
       const acts = day.activities || [];
@@ -765,7 +820,7 @@ app.post('/api/compute-routes', async (req, res) => {
           const route = await computeRouteMinutes(
             { lat: prev.lat, lng: prev.lng },
             { lat: cur.lat, lng: cur.lng },
-            travelMode || 'DRIVE'
+            safeTravelMode
           );
           cur.travelFromPrevious = route;
         } else {
@@ -779,7 +834,7 @@ app.post('/api/compute-routes', async (req, res) => {
   }
 });
 
-app.post('/api/apply-constraints', async (req, res) => {
+app.post('/api/apply-constraints', writeApiLimiter, async (req, res) => {
   try {
     const { itinerary, constraints = {} } = req.body;
     if (!itinerary?.days) return res.status(400).json({ success: false, error: 'Missing itinerary.' });
@@ -832,23 +887,31 @@ app.post('/api/apply-constraints', async (req, res) => {
   }
 });
 
-app.post('/api/replan-segment', async (req, res) => {
+app.post('/api/replan-segment', writeApiLimiter, async (req, res) => {
   try {
     if (!hasValidGeminiKey()) {
       return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
     const { itinerary, dayIndex, startActivityIndex, endActivityIndex, reason, constraints = {} } = req.body;
-    if (!itinerary?.days || dayIndex === undefined || startActivityIndex === undefined || endActivityIndex === undefined) {
+    const safeDayIndex = Number(dayIndex);
+    const safeStartIndex = Number(startActivityIndex);
+    const safeEndIndex = Number(endActivityIndex);
+    if (!itinerary?.days || !Number.isInteger(safeDayIndex) || !Number.isInteger(safeStartIndex) || !Number.isInteger(safeEndIndex)) {
       return res.status(400).json({ success: false, error: 'Missing required fields for segment replan.' });
     }
-    const day = itinerary.days[dayIndex];
-    const before = day.activities.slice(0, startActivityIndex).map(a => a.title).join(', ');
-    const after = day.activities.slice(endActivityIndex + 1).map(a => a.title).join(', ');
-    const originalSeg = day.activities.slice(startActivityIndex, endActivityIndex + 1);
+    const day = itinerary.days[safeDayIndex];
+    if (!day || !Array.isArray(day.activities) || safeStartIndex < 0 || safeEndIndex < safeStartIndex || safeEndIndex >= day.activities.length) {
+      return res.status(400).json({ success: false, error: 'Invalid segment indexes for replan.' });
+    }
+    const reasonSafe = sanitizeText(reason, 220);
+    const before = day.activities.slice(0, safeStartIndex).map((a) => sanitizeText(a.title, 80)).join(', ');
+    const after = day.activities.slice(safeEndIndex + 1).map((a) => sanitizeText(a.title, 80)).join(', ');
+    const originalSeg = day.activities.slice(safeStartIndex, safeEndIndex + 1);
     const segmentSize = originalSeg.length;
     const slotBudget = originalSeg.reduce((s, a) => s + Number(a.estimatedCost || 0), 0);
 
-    const prompt = `Replan a segment of a day itinerary.\n\nDay context: ${day.theme || `Day ${day.day}`} (${day.date || ''})\nReason: ${reason || 'Improve fit'}\nKeep activities before segment unchanged: ${before || 'none'}\nKeep activities after segment unchanged: ${after || 'none'}\nSegment length must be exactly ${segmentSize} activities.\nSegment budget should stay near $${slotBudget}.\nMax travel minutes per hop: ${constraints.maxTravelMinutesPerHop || 90}.\n\nReturn ONLY JSON:\n{\n  "activities": [\n    {\n      "time": "09:00 AM",\n      "title": "Activity name",\n      "description": "Brief description",\n      "location": "Full place name and area",\n      "lat": 0.0,\n      "lng": 0.0,\n      "duration": "2 hours",\n      "estimatedCost": 0,\n      "category": "sightseeing|food|adventure|culture|shopping|transport|relaxation"\n    }\n  ]\n}`;
+    const maxTravelMinutesPerHop = Number(constraints.maxTravelMinutesPerHop || 90);
+    const prompt = `Replan a segment of a day itinerary.\n\nDay context: ${day.theme || `Day ${day.day}`} (${day.date || ''})\nReason: ${reasonSafe || 'Improve fit'}\nKeep activities before segment unchanged: ${before || 'none'}\nKeep activities after segment unchanged: ${after || 'none'}\nSegment length must be exactly ${segmentSize} activities.\nSegment budget should stay near $${slotBudget}.\nMax travel minutes per hop: ${maxTravelMinutesPerHop}.\n\nReturn ONLY JSON:\n{\n  "activities": [\n    {\n      "time": "09:00 AM",\n      "title": "Activity name",\n      "description": "Brief description",\n      "location": "Full place name and area",\n      "lat": 0.0,\n      "lng": 0.0,\n      "duration": "2 hours",\n      "estimatedCost": 0,\n      "category": "sightseeing|food|adventure|culture|shopping|transport|relaxation"\n    }\n  ]\n}`;
 
     const model = getModel();
     const result = await withTimeout(
@@ -862,15 +925,15 @@ app.post('/api/replan-segment', async (req, res) => {
       return res.status(500).json({ success: false, error: 'Segment replan output size mismatch.' });
     }
 
-    day.activities.splice(startActivityIndex, segmentSize, ...newSeg);
+    day.activities.splice(safeStartIndex, segmentSize, ...newSeg);
     enrichWithBookingLinks(itinerary);
-    res.json({ success: true, itinerary, dayIndex, startActivityIndex, endActivityIndex });
+    res.json({ success: true, itinerary, dayIndex: safeDayIndex, startActivityIndex: safeStartIndex, endActivityIndex: safeEndIndex });
   } catch (error) {
     res.status(500).json({ success: false, error: formatApiError(error, 'Failed to replan segment') });
   }
 });
 
-app.post('/api/email-itinerary', async (req, res) => {
+app.post('/api/email-itinerary', writeApiLimiter, async (req, res) => {
   try {
     if (!hasValidMailerConfig()) {
       const missing = missingMailerFields();
@@ -880,8 +943,13 @@ app.post('/api/email-itinerary', async (req, res) => {
       });
     }
     const { toEmail, itinerary } = req.body;
-    if (!toEmail || !itinerary?.days) {
+    const safeToEmail = sanitizeText(toEmail, 254).toLowerCase();
+    if (!safeToEmail || !itinerary?.days) {
       return res.status(400).json({ success: false, error: 'Missing toEmail or itinerary.' });
+    }
+    const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailPattern.test(safeToEmail)) {
+      return res.status(400).json({ success: false, error: 'Invalid recipient email address.' });
     }
 
     const cfg = getMailerConfig();
@@ -898,13 +966,13 @@ app.post('/api/email-itinerary', async (req, res) => {
 
     await transporter.sendMail({
       from: cfg.from,
-      to: toEmail,
+      to: safeToEmail,
       subject,
       text,
       html
     });
 
-    res.json({ success: true, message: `Itinerary sent to ${toEmail}` });
+    res.json({ success: true, message: `Itinerary sent to ${safeToEmail}` });
   } catch (error) {
     res.status(500).json({ success: false, error: formatApiError(error, 'Failed to send itinerary email') });
   }
