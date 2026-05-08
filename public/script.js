@@ -318,7 +318,7 @@ function setReplanBusy(isBusy) {
   });
 }
 
-function askReason(titleText) {
+function askReason(titleText, options = {}) {
   const modal = document.getElementById('reason-modal');
   const input = document.getElementById('reason-input');
   const okBtn = document.getElementById('reason-ok');
@@ -332,6 +332,9 @@ function askReason(titleText) {
   return new Promise(resolve => {
     title.textContent = titleText;
     input.value = '';
+    input.type = options.inputType || 'text';
+    if (options.placeholder !== undefined) input.placeholder = options.placeholder;
+    if (options.autocomplete !== undefined) input.autocomplete = options.autocomplete;
     modal.classList.remove('hidden');
     modal.setAttribute('aria-hidden', 'false');
     setTimeout(() => input.focus(), 10);
@@ -339,6 +342,7 @@ function askReason(titleText) {
     const cleanup = (value) => {
       modal.classList.add('hidden');
       modal.setAttribute('aria-hidden', 'true');
+      input.type = 'text';
       okBtn.removeEventListener('click', onOk);
       cancelBtn.removeEventListener('click', onCancel);
       modal.removeEventListener('click', onBackdrop);
@@ -346,11 +350,16 @@ function askReason(titleText) {
       resolve(value);
     };
 
-    const onOk = () => cleanup(input.value.trim());
-    const onCancel = () => cleanup(null);
-    const onBackdrop = (e) => {
-      if (e.target === modal) cleanup(null);
+    const onOk = () => {
+      const value = input.value.trim();
+      if (typeof options.validate === 'function') {
+        const error = options.validate(value);
+        if (error) { showToast(error); input.focus(); return; }
+      }
+      cleanup(value);
     };
+    const onCancel = () => cleanup(null);
+    const onBackdrop = (e) => { if (e.target === modal) cleanup(null); };
     const onKeyDown = (e) => {
       if (e.key === 'Enter') onOk();
       if (e.key === 'Escape') onCancel();
@@ -414,8 +423,21 @@ async function loadMapsAPI() {
     mapsReady = false;
     showMapUnavailable('Google Maps authorization failed. Check key restrictions for localhost.');
   };
-  const res = await fetch('/api/maps-key');
-  const { key } = await res.json();
+  const res = await fetch('/api/maps-key', { cache: 'no-store' });
+  if (!res.ok) {
+    throw new Error(`Maps key request failed (${res.status}).`);
+  }
+  const contentType = res.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    throw new Error('Maps key endpoint returned non-JSON response.');
+  }
+  let payload;
+  try {
+    payload = await res.json();
+  } catch {
+    throw new Error('Maps key endpoint returned invalid JSON.');
+  }
+  const key = payload?.key;
   if (!key || typeof key !== 'string' || !key.trim()) {
     throw new Error('Missing GOOGLE_MAPS_API_KEY');
   }
@@ -542,6 +564,9 @@ function showDay(index, data) {
     const card = document.createElement('div');
     card.className = `activity-card glass-card cat-${cat}`;
     card.id = `activity-${index}-${ai}`;
+    card.setAttribute('role', 'button');
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('aria-label', `Focus ${act.title || 'activity'} on map`);
 
     const dIdx = Number(index);
     const aIdx = Number(ai);
@@ -581,12 +606,19 @@ function showDay(index, data) {
       </div>
       ${bookingHTML}`;
 
-    card.addEventListener('click', (e) => {
-      if (e.target.closest('a') || e.target.closest('button')) return;
+    const focusOnMap = (e) => {
+      if (e.target.closest('a') || e.target.closest('button') || e.target.closest('input') || e.target.closest('label')) return;
       const pos = toLatLng(act);
       if (gMap && pos) {
         gMap.panTo(pos);
         gMap.setZoom(15);
+      }
+    };
+    card.addEventListener('click', focusOnMap);
+    card.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        focusOnMap(e);
       }
     });
     section.appendChild(card);
@@ -1002,8 +1034,17 @@ document.getElementById('email-btn').addEventListener('click', async () => {
     showError('Generate an itinerary first.');
     return;
   }
-  const toEmail = (prompt('Enter recipient email address') || '').trim();
-  if (!toEmail) return;
+  const toEmail = await askReason('Send itinerary to which email?', {
+    placeholder: 'you@example.com',
+    inputType: 'email',
+    autocomplete: 'email',
+    validate: (v) => {
+      if (!v) return 'Email address is required.';
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return 'Please enter a valid email address.';
+      return null;
+    }
+  });
+  if (toEmail === null || !toEmail) return;
 
   try {
     const res = await fetch('/api/email-itinerary', {
@@ -1011,12 +1052,13 @@ document.getElementById('email-btn').addEventListener('click', async () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ toEmail, itinerary: itineraryData })
     });
-    const data = await res.json();
-    if (!res.ok || !data.success) {
-      showError(data.error || `Failed to send email (${res.status}).`);
+    let data = null;
+    try { data = await res.json(); } catch { /* swallow; fall through to status check */ }
+    if (!res.ok || !data?.success) {
+      showError(data?.error || `Failed to send email (${res.status}).`);
       return;
     }
-    alert(data.message || 'Itinerary emailed successfully.');
+    showToast(data.message || 'Itinerary emailed successfully.', 'success');
   } catch (err) {
     showError('Network error while sending email.');
   }

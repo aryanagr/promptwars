@@ -21,7 +21,8 @@ if (!isCloudRun) {
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.disable('x-powered-by');
-app.set('trust proxy', true);
+const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS || 1);
+app.set('trust proxy', Number.isFinite(trustProxyHops) && trustProxyHops >= 0 ? trustProxyHops : 1);
 
 function readFromFileEnv(name) {
   const filePath = process.env[`${name}_FILE`];
@@ -48,7 +49,18 @@ function getGeminiApiKey() {
 }
 
 function getMapsApiKey() {
+  // Legacy single-key accessor — used as fallback when split keys aren't set.
   return envValue('GOOGLE_MAPS_API_KEY', 'MAPS_API_KEY');
+}
+
+function getMapsApiKeyClient() {
+  // Browser-exposed key; should be referrer-restricted in GCP console.
+  return envValue('GOOGLE_MAPS_API_KEY_CLIENT', 'GOOGLE_MAPS_BROWSER_KEY') || getMapsApiKey();
+}
+
+function getMapsApiKeyServer() {
+  // Server-side key for Places/Routes; should be IP-restricted in GCP console.
+  return envValue('GOOGLE_MAPS_API_KEY_SERVER', 'GOOGLE_MAPS_BACKEND_KEY') || getMapsApiKey();
 }
 
 function getMailerConfig() {
@@ -79,8 +91,12 @@ function hasValidGeminiKey() {
 }
 
 function hasValidMapsKey() {
-  const key = getMapsApiKey();
-  return Boolean(key);
+  // Server-side endpoints (Places, Routes) require the server key.
+  return Boolean(getMapsApiKeyServer());
+}
+
+function hasValidMapsClientKey() {
+  return Boolean(getMapsApiKeyClient());
 }
 
 function hasValidMailerConfig() {
@@ -206,6 +222,7 @@ const writeApiLimiter = createRateLimiter({
 
 const itineraryCache = new Map();
 const itineraryCacheTtlMs = Number(envValue('ITINERARY_CACHE_TTL_MS') || 180000);
+const itineraryCacheMaxEntries = Number(envValue('ITINERARY_CACHE_MAX_ENTRIES') || 500);
 
 const GEMINI_TIMEOUT_MS = {
   generate: Number(envValue('GEMINI_GENERATE_TIMEOUT_MS') || 50000),
@@ -253,21 +270,66 @@ function getCachedItinerary(cacheKey) {
 }
 
 function setCachedItinerary(cacheKey, itinerary) {
+  // Map preserves insertion order. Re-set keeps freshness ordering by
+  // delete-then-set, and we evict oldest entries past the cap.
+  if (itineraryCache.has(cacheKey)) itineraryCache.delete(cacheKey);
   itineraryCache.set(cacheKey, {
     expiresAt: Date.now() + itineraryCacheTtlMs,
     value: JSON.parse(JSON.stringify(itinerary))
   });
+  while (itineraryCache.size > itineraryCacheMaxEntries) {
+    const oldestKey = itineraryCache.keys().next().value;
+    if (oldestKey === undefined) break;
+    itineraryCache.delete(oldestKey);
+  }
 }
 
 const allowedOrigins = getAllowedOrigins();
-app.use(cors(allowedOrigins.length === 0 ? {} : {
+// Default: deny cross-origin browser requests (same-origin still works because
+// browsers don't enforce CORS on same-origin). Set CORS_ORIGINS env to allow
+// specific cross-origin clients (comma-separated list).
+app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+    // No Origin header (server-to-server, curl, same-origin GETs) — allow.
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) return callback(null, true);
     return callback(null, false);
   }
 }));
 app.use(express.json({ limit: envValue('JSON_BODY_LIMIT') || '250kb' }));
 app.use(securityHeadersMiddleware);
+
+// Origin guard for state-changing endpoints. Requires the request's Origin (or
+// Referer fallback) to match an allowed origin or the request's own host.
+// Disabled when ORIGIN_GUARD env is "off"/"false".
+const originGuardEnabled = !['off', 'false', '0'].includes(
+  String(envValue('ORIGIN_GUARD') || '').toLowerCase()
+);
+
+function originGuard(req, res, next) {
+  if (!originGuardEnabled) return next();
+  const host = req.get('host');
+  const origin = req.get('origin');
+  let candidate = origin;
+  if (!candidate) {
+    const referer = req.get('referer');
+    if (referer) {
+      try { candidate = new URL(referer).origin; } catch { candidate = null; }
+    }
+  }
+  if (!candidate) {
+    return res.status(403).json({ success: false, error: 'Origin header required for this endpoint.' });
+  }
+  const expected = new Set(allowedOrigins);
+  if (host) {
+    expected.add(`http://${host}`);
+    expected.add(`https://${host}`);
+  }
+  if (!expected.has(candidate)) {
+    return res.status(403).json({ success: false, error: 'Origin not allowed.' });
+  }
+  next();
+}
 app.use((req, res, next) => {
   if (req.path.endsWith('.js') || req.path.endsWith('.css')) {
     res.setHeader('Cache-Control', 'no-store');
@@ -292,9 +354,16 @@ function getModel() {
   });
 }
 
+const exposeErrorDetails = ['true', '1', 'on'].includes(
+  String(envValue('EXPOSE_ERROR_DETAILS') || '').toLowerCase()
+);
+
 function formatApiError(error, fallbackMessage) {
   const providerMessage = error?.message || error?.errorDetails?.[0]?.message;
-  if (providerMessage) return `${fallbackMessage} (${providerMessage})`;
+  // Always log the full provider message server-side for diagnosis.
+  if (providerMessage) console.error(`[api-error] ${fallbackMessage}: ${providerMessage}`);
+  // Only echo provider details to clients when explicitly enabled (debug envs).
+  if (exposeErrorDetails && providerMessage) return `${fallbackMessage} (${providerMessage})`;
   return fallbackMessage;
 }
 
@@ -351,7 +420,7 @@ function durationTextToMinutes(duration) {
 }
 
 async function placesTextSearch(query) {
-  const key = getMapsApiKey();
+  const key = getMapsApiKeyServer();
   const url = 'https://places.googleapis.com/v1/places:searchText';
   const body = {
     textQuery: query,
@@ -375,7 +444,7 @@ async function placesTextSearch(query) {
 }
 
 async function computeRouteMinutes(origin, destination, travelMode = 'DRIVE') {
-  const key = getMapsApiKey();
+  const key = getMapsApiKeyServer();
   const url = 'https://routes.googleapis.com/directions/v2:computeRoutes';
   const body = {
     origin: { location: { latLng: { latitude: origin.lat, longitude: origin.lng } } },
@@ -568,7 +637,7 @@ async function generateWithRetry(prompt, maxRetries = 1) {
 }
 
 app.get('/api/maps-key', (req, res) => {
-  res.json({ key: getMapsApiKey() });
+  res.json({ key: getMapsApiKeyClient() });
 });
 
 app.get('/api/health', (req, res) => {
@@ -584,7 +653,7 @@ app.get('/api/health', (req, res) => {
   });
 });
 
-app.post('/api/generate-itinerary', writeApiLimiter, async (req, res) => {
+app.post('/api/generate-itinerary', originGuard, writeApiLimiter, async (req, res) => {
   try {
     const {
       fromPlace,
@@ -677,7 +746,7 @@ app.post('/api/generate-itinerary', writeApiLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/replan-activity', writeApiLimiter, async (req, res) => {
+app.post('/api/replan-activity', originGuard, writeApiLimiter, async (req, res) => {
   try {
     const { itinerary, dayIndex, activityIndex, reason } = req.body;
     const safeDayIndex = Number(dayIndex);
@@ -752,7 +821,7 @@ Return ONLY a single JSON object for the replacement activity (no markdown, no c
   }
 });
 
-app.post('/api/replan-day', writeApiLimiter, async (req, res) => {
+app.post('/api/replan-day', originGuard, writeApiLimiter, async (req, res) => {
   try {
     const { itinerary, dayIndex, reason } = req.body;
     const safeDayIndex = Number(dayIndex);
@@ -798,7 +867,7 @@ app.post('/api/replan-day', writeApiLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/validate-places', writeApiLimiter, async (req, res) => {
+app.post('/api/validate-places', originGuard, writeApiLimiter, async (req, res) => {
   try {
     if (!hasValidMapsKey()) {
       return res.status(500).json({ success: false, error: 'GOOGLE_MAPS_API_KEY is not configured.' });
@@ -839,7 +908,7 @@ app.post('/api/validate-places', writeApiLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/compute-routes', writeApiLimiter, async (req, res) => {
+app.post('/api/compute-routes', originGuard, writeApiLimiter, async (req, res) => {
   try {
     if (!hasValidMapsKey()) {
       return res.status(500).json({ success: false, error: 'GOOGLE_MAPS_API_KEY is not configured.' });
@@ -875,7 +944,7 @@ app.post('/api/compute-routes', writeApiLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/apply-constraints', writeApiLimiter, async (req, res) => {
+app.post('/api/apply-constraints', originGuard, writeApiLimiter, async (req, res) => {
   try {
     const { itinerary, constraints = {} } = req.body;
     if (!itinerary?.days) return res.status(400).json({ success: false, error: 'Missing itinerary.' });
@@ -928,7 +997,7 @@ app.post('/api/apply-constraints', writeApiLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/replan-segment', writeApiLimiter, async (req, res) => {
+app.post('/api/replan-segment', originGuard, writeApiLimiter, async (req, res) => {
   try {
     if (!hasValidGeminiKey()) {
       return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
@@ -974,7 +1043,7 @@ app.post('/api/replan-segment', writeApiLimiter, async (req, res) => {
   }
 });
 
-app.post('/api/email-itinerary', writeApiLimiter, async (req, res) => {
+app.post('/api/email-itinerary', originGuard, writeApiLimiter, async (req, res) => {
   try {
     if (!hasValidMailerConfig()) {
       const missing = missingMailerFields();
@@ -1023,6 +1092,10 @@ app.post('/api/email-itinerary', writeApiLimiter, async (req, res) => {
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Travel Planner running at http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  app.listen(PORT, () => {
+    console.log(`Travel Planner running at http://localhost:${PORT}`);
+  });
+}
+
+module.exports = { app };
