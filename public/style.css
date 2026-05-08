@@ -140,8 +140,11 @@ footer { text-align:center; padding:30px; color:var(--text-secondary); font-size
 
 /* === Day Header Row === */
 .day-header-row { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+.day-header-actions { display:flex; align-items:center; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
 .btn-replan-day { padding:8px 16px; background:rgba(108,92,231,0.2); border:1px solid var(--accent-1); border-radius:var(--radius-sm); color:var(--accent-2); font-size:13px; cursor:pointer; transition:all 0.3s; font-family:var(--font-body); }
 .btn-replan-day:hover { background:var(--accent-1); color:#fff; transform:scale(1.05); }
+.btn-route-day { padding:8px 14px; background:rgba(0,206,201,0.15); border:1px solid var(--accent-2); border-radius:var(--radius-sm); color:var(--accent-2); font-size:13px; cursor:pointer; transition:all 0.3s; font-family:var(--font-body); }
+.btn-route-day:hover { background:var(--accent-2); color:#04131d; transform:scale(1.05); }
 
 /* === Activity Actions (Booking + Replan) === */
 .activity-actions { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
@@ -166,6 +169,8 @@ footer { text-align:center; padding:30px; color:var(--text-secondary); font-size
 .error-toast { position:fixed; bottom:30px; left:50%; transform:translateX(-50%) translateY(100px); background:rgba(231,76,60,0.95); color:#fff; padding:14px 28px; border-radius:var(--radius-md); font-size:14px; z-index:9999; transition:transform 0.4s cubic-bezier(0.34,1.56,0.64,1); backdrop-filter:blur(10px); box-shadow:0 8px 30px rgba(231,76,60,0.3); }
 .error-toast.show { transform:translateX(-50%) translateY(0); }
 
+.map-unavailable { display:flex; align-items:center; justify-content:center; height:100%; color:var(--text-secondary); padding:16px; text-align:center; font-size:13px; }
+
 /* === Responsive === */
 @media (max-width:768px) {
   .form-grid { grid-template-columns:1fr; }
@@ -178,4 +183,5 @@ footer { text-align:center; padding:30px; color:var(--text-secondary); font-size
   .trip-stats { gap:10px; }
   .stat { padding:12px 16px; min-width:90px; }
   .day-header-row { flex-direction:column; align-items:flex-start; gap:8px; }
+  .day-header-actions { justify-content:flex-start; }
 }

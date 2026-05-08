@@ -1,4 +1,6 @@
 let map, markers = [], itineraryData = null, currentDayIndex = 0, mapsReady = false;
+let directionsService = null;
+let directionsRenderer = null;
 const ACTIVITIES_PER_PAGE = 5;
 const dayActivityPage = {};
 
@@ -73,39 +75,43 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
         console.error('Google Maps load failed:', mapErr);
       }
       renderResults(data.itinerary);
-      if (!mapsReady) {
-        showError('Itinerary generated, but Google Maps failed to load. Check Maps API key/referrer settings.');
-      }
+      if (!mapsReady) showToast('Itinerary generated, but Google Maps failed to load. Check Maps API key/referrer settings.');
     }
   } catch (err) {
     clearTimeout(timeout);
     if (err.name === 'AbortError') {
-      showError('Request timed out. The AI took too long — please try again.');
+      showFatalError('Request timed out. The AI took too long — please try again.');
     } else if (err?.message) {
-      showError(err.message);
+      showFatalError(err.message);
     } else {
-      showError('Network error. Check your connection and try again.');
+      showFatalError('Network error. Check your connection and try again.');
     }
   }
 });
 
-function showError(msg) {
-  document.getElementById('loading-section').style.display = 'none';
-  document.getElementById('hero').style.display = 'flex';
-  const btn = document.getElementById('generate-btn');
-  btn.querySelector('.btn-text').style.display = 'inline';
-  btn.querySelector('.btn-loader').style.display = 'none';
-  btn.disabled = false;
-
-  // Show toast
+function showToast(msg) {
   const toast = document.createElement('div');
   toast.className = 'error-toast';
   toast.innerHTML = `⚠️ ${msg}`;
   document.body.appendChild(toast);
   setTimeout(() => { toast.classList.add('show'); }, 10);
   setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 400); }, 5000);
+}
 
+function showFatalError(msg) {
+  document.getElementById('loading-section').style.display = 'none';
+  document.getElementById('hero').style.display = 'flex';
+  document.getElementById('results-section').style.display = 'none';
+  const btn = document.getElementById('generate-btn');
+  btn.querySelector('.btn-text').style.display = 'inline';
+  btn.querySelector('.btn-loader').style.display = 'none';
+  btn.disabled = false;
+  showToast(msg);
   resetLoadingSteps();
+}
+
+function showError(msg) {
+  showToast(msg);
 }
 
 function resetForm() {
@@ -154,6 +160,10 @@ function animateLoadingSteps() {
 // Load Google Maps
 async function loadMapsAPI() {
   if (window.google && window.google.maps) return;
+  window.gm_authFailure = () => {
+    mapsReady = false;
+    showMapUnavailable('Google Maps authorization failed. Check key restrictions for localhost.');
+  };
   const res = await fetch('/api/maps-key');
   const { key } = await res.json();
   if (!key || typeof key !== 'string' || !key.trim()) {
@@ -163,10 +173,27 @@ async function loadMapsAPI() {
     const script = document.createElement('script');
     script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=marker`;
     script.async = true;
-    script.onload = resolve;
+    script.onload = () => {
+      if (window.google && window.google.maps) resolve();
+      else reject(new Error('Google Maps SDK loaded but unavailable.'));
+    };
     script.onerror = () => reject(new Error('Failed to load Google Maps'));
     document.head.appendChild(script);
   });
+}
+
+function showMapUnavailable(msg) {
+  const mapEl = document.getElementById('map');
+  if (!mapEl) return;
+  mapEl.innerHTML = `<div class="map-unavailable">${msg}</div>`;
+}
+
+function toLatLng(activity) {
+  const lat = Number(activity?.lat);
+  const lng = Number(activity?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { lat, lng };
 }
 
 // Render results
@@ -210,10 +237,7 @@ function renderResults(data) {
   if (mapsReady) {
     initMap(data);
   } else {
-    const mapEl = document.getElementById('map');
-    if (mapEl) {
-      mapEl.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#a0a0c0;padding:16px;text-align:center;">Map unavailable. Configure a valid Google Maps API key and allowed referrers.</div>';
-    }
+    showMapUnavailable('Map unavailable. Configure a valid Google Maps API key and allowed referrers.');
   }
 }
 
@@ -235,7 +259,11 @@ function showDay(index, data) {
   section.innerHTML = `
     <div class="day-header-row">
       <div class="day-header">📌 ${day.theme || 'Day ' + day.day} <span style="font-size:13px;color:var(--text-secondary);font-weight:400;">${day.date || ''}</span></div>
-      <button class="btn-replan-day" onclick="replanDay(${index})">🔄 Replan Day</button>
+      <div class="day-header-actions">
+        <button class="btn-route-day" onclick="startRoute(${index})">▶ Start Route</button>
+        <button class="btn-route-day" onclick="clearRoute()">✖ Clear Route</button>
+        <button class="btn-replan-day" onclick="replanDay(${index})">🔄 Replan Day</button>
+      </div>
     </div>`;
 
   const activities = day.activities || [];
@@ -274,8 +302,9 @@ function showDay(index, data) {
 
     card.addEventListener('click', (e) => {
       if (e.target.closest('a') || e.target.closest('button')) return;
-      if (map && act.lat && act.lng) {
-        map.panTo({ lat: act.lat, lng: act.lng });
+      const pos = toLatLng(act);
+      if (map && pos) {
+        map.panTo(pos);
         map.setZoom(15);
       }
     });
@@ -363,28 +392,41 @@ async function replanDay(dayIndex) {
 function initMap(data) {
   const allCoords = [];
   data.days.forEach(d => (d.activities || []).forEach(a => {
-    if (a.lat && a.lng) allCoords.push({ lat: a.lat, lng: a.lng });
+    const pos = toLatLng(a);
+    if (pos) allCoords.push(pos);
   }));
 
   const center = allCoords.length > 0
     ? { lat: allCoords.reduce((s,c) => s+c.lat, 0)/allCoords.length, lng: allCoords.reduce((s,c) => s+c.lng, 0)/allCoords.length }
     : { lat: 0, lng: 0 };
 
-  map = new google.maps.Map(document.getElementById('map'), {
-    center, zoom: 12,
-    styles: [
-      { elementType: 'geometry', stylers: [{ color: '#1d1d3b' }] },
-      { elementType: 'labels.text.stroke', stylers: [{ color: '#1d1d3b' }] },
-      { elementType: 'labels.text.fill', stylers: [{ color: '#8ec3b9' }] },
-      { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#2c2c54' }] },
-      { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0e0e2c' }] },
-      { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#242452' }] },
-      { featureType: 'poi', elementType: 'labels.text.fill', stylers: [{ color: '#6c5ce7' }] },
-      { featureType: 'transit', elementType: 'geometry', stylers: [{ color: '#2c2c54' }] }
-    ],
-    disableDefaultUI: true, zoomControl: true
-  });
-  highlightDayOnMap(data.days[0]);
+  try {
+    map = new google.maps.Map(document.getElementById('map'), {
+      center, zoom: 12,
+      styles: [
+        { elementType: 'geometry', stylers: [{ color: '#1d1d3b' }] },
+        { elementType: 'labels.text.stroke', stylers: [{ color: '#1d1d3b' }] },
+        { elementType: 'labels.text.fill', stylers: [{ color: '#8ec3b9' }] },
+        { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#2c2c54' }] },
+        { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0e0e2c' }] },
+        { featureType: 'poi', elementType: 'geometry', stylers: [{ color: '#242452' }] },
+        { featureType: 'poi', elementType: 'labels.text.fill', stylers: [{ color: '#6c5ce7' }] },
+        { featureType: 'transit', elementType: 'geometry', stylers: [{ color: '#2c2c54' }] }
+      ],
+      disableDefaultUI: true, zoomControl: true
+    });
+    directionsService = new google.maps.DirectionsService();
+    directionsRenderer = new google.maps.DirectionsRenderer({
+      suppressMarkers: true,
+      preserveViewport: false,
+      polylineOptions: { strokeColor: '#00cec9', strokeOpacity: 0.9, strokeWeight: 5 }
+    });
+    directionsRenderer.setMap(map);
+    highlightDayOnMap(data.days[0]);
+  } catch (e) {
+    mapsReady = false;
+    showMapUnavailable('Unable to initialize map. Check API key, Maps JS API enablement, and billing.');
+  }
 }
 
 function highlightDayOnMap(day) {
@@ -395,8 +437,8 @@ function highlightDayOnMap(day) {
   const colors = { sightseeing:'#6c5ce7', food:'#f39c12', adventure:'#e74c3c', culture:'#9b59b6', shopping:'#fd79a8', transport:'#636e72', relaxation:'#00cec9' };
 
   day.activities.forEach((act, i) => {
-    if (!act.lat || !act.lng) return;
-    const pos = { lat: act.lat, lng: act.lng };
+    const pos = toLatLng(act);
+    if (!pos) return;
     bounds.extend(pos);
     const marker = new google.maps.Marker({
       position: pos, map,
@@ -413,6 +455,43 @@ function highlightDayOnMap(day) {
 
   if (markers.length > 1) map.fitBounds(bounds, 50);
   else if (markers.length === 1) { map.setCenter(markers[0].getPosition()); map.setZoom(14); }
+}
+
+function clearRoute() {
+  if (directionsRenderer) directionsRenderer.set('directions', null);
+}
+
+function startRoute(dayIndex) {
+  if (!mapsReady || !map || !directionsService || !directionsRenderer) {
+    showToast('Map is not ready yet.');
+    return;
+  }
+  const day = itineraryData?.days?.[dayIndex];
+  if (!day) return;
+
+  const points = (day.activities || [])
+    .map(toLatLng)
+    .filter(Boolean);
+
+  if (points.length < 2) {
+    showToast('Need at least 2 valid locations to draw route.');
+    return;
+  }
+
+  const waypoints = points.slice(1, -1).map(p => ({ location: p, stopover: true }));
+  directionsService.route({
+    origin: points[0],
+    destination: points[points.length - 1],
+    waypoints,
+    optimizeWaypoints: false,
+    travelMode: google.maps.TravelMode.DRIVING
+  }, (result, status) => {
+    if (status === 'OK' && result) {
+      directionsRenderer.setDirections(result);
+    } else {
+      showToast(`Route failed: ${status}`);
+    }
+  });
 }
 
 // Back button
