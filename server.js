@@ -56,7 +56,14 @@ function getModel() {
     throw new Error('GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.');
   }
   const genAI = new GoogleGenerativeAI(key);
-  return genAI.getGenerativeModel({ model: 'gemini-2.5-flash' });
+  return genAI.getGenerativeModel({
+    model: 'gemini-2.5-flash-lite',
+    generationConfig: {
+      temperature: 0.5,
+      maxOutputTokens: 1400,
+      responseMimeType: 'application/json'
+    }
+  });
 }
 
 function formatApiError(error, fallbackMessage) {
@@ -202,13 +209,47 @@ function validateItinerary(data) {
 }
 
 function cleanAndParseJSON(text) {
-  let cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  let cleaned = (text || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  if (!cleaned) throw new Error('Empty AI response');
   const jsonStart = cleaned.indexOf('{');
   const jsonEnd = cleaned.lastIndexOf('}');
   if (jsonStart !== -1 && jsonEnd !== -1) {
     cleaned = cleaned.slice(jsonStart, jsonEnd + 1);
   }
-  return JSON.parse(cleaned);
+  try {
+    return JSON.parse(cleaned);
+  } catch (e) {
+    // Try lightweight repair for truncated LLM JSON.
+    let inString = false;
+    let escaped = false;
+    let brace = 0;
+    let bracket = 0;
+    for (const ch of cleaned) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = !inString;
+        continue;
+      }
+      if (!inString) {
+        if (ch === '{') brace += 1;
+        if (ch === '}') brace -= 1;
+        if (ch === '[') bracket += 1;
+        if (ch === ']') bracket -= 1;
+      }
+    }
+    let repaired = cleaned;
+    if (inString) repaired += '"';
+    if (bracket > 0) repaired += ']'.repeat(bracket);
+    if (brace > 0) repaired += '}'.repeat(brace);
+    return JSON.parse(repaired);
+  }
 }
 
 function enrichWithBookingLinks(itinerary) {
@@ -234,6 +275,7 @@ Rules:
 - Use real coordinates.
 - Stay within budget.
 - Avoid duplicate places.
+- Keep each day to 3-4 activities max.
 Format:
 {
   "tripTitle": "string",
@@ -254,7 +296,7 @@ Format:
           "location": "string",
           "lat": 0.0,
           "lng": 0.0,
-          "duration": "90 mins",
+          "duration": "60 mins",
           "estimatedCost": 0,
           "category": "sightseeing|food|adventure|culture|shopping|transport|relaxation"
         }
@@ -263,7 +305,7 @@ Format:
   ]
 }`;
 
-async function generateWithRetry(prompt, maxRetries = 0) {
+async function generateWithRetry(prompt, maxRetries = 1) {
   const model = getModel();
   let lastError = null;
 
@@ -271,7 +313,7 @@ async function generateWithRetry(prompt, maxRetries = 0) {
     try {
       const result = await withTimeout(
         model.generateContent(prompt),
-        12000,
+        22000,
         'AI is taking too long to respond. Please try again.'
       );
       const response = await result.response;
