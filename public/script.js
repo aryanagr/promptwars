@@ -32,6 +32,24 @@ function normalizeCityName(value) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function safeUrl(value) {
+  const raw = String(value == null ? '' : value).trim();
+  if (!raw) return '';
+  if (/^(https?:|mailto:|tel:)/i.test(raw) || raw.startsWith('/') || raw.startsWith('#')) {
+    return escapeHtml(raw);
+  }
+  return '';
+}
+
 function syncDestinationWithTo() {
   const toInput = document.getElementById('to-place');
   const destinationInput = document.getElementById('destination');
@@ -268,7 +286,7 @@ function showToast(msg, type = 'error') {
   toast.className = `error-toast${type === 'success' ? ' success' : ''}`;
   toast.setAttribute('role', type === 'success' ? 'status' : 'alert');
   toast.setAttribute('aria-live', type === 'success' ? 'polite' : 'assertive');
-  toast.innerHTML = `${type === 'success' ? '✅' : '⚠️'} ${msg}`;
+  toast.textContent = `${type === 'success' ? '✅' : '⚠️'} ${msg}`;
   document.body.appendChild(toast);
   setTimeout(() => { toast.classList.add('show'); }, 10);
   setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 400); }, 5000);
@@ -417,7 +435,11 @@ async function loadMapsAPI() {
 function showMapUnavailable(msg) {
   const mapEl = document.getElementById('map');
   if (!mapEl) return;
-  mapEl.innerHTML = `<div class="map-unavailable">${msg}</div>`;
+  mapEl.innerHTML = '';
+  const wrap = document.createElement('div');
+  wrap.className = 'map-unavailable';
+  wrap.textContent = msg;
+  mapEl.appendChild(wrap);
 }
 
 function toLatLng(activity) {
@@ -490,13 +512,16 @@ function showDay(index, data) {
   section.className = 'day-section';
 
   // Day header with replan button
+  const dayHeaderText = escapeHtml(day.theme || 'Day ' + day.day);
+  const dayMetaText = escapeHtml(`${day.date || ''}${day.city ? ` · ${day.city}` : ''}`);
+  const safeIndex = Number(index);
   section.innerHTML = `
     <div class="day-header-row">
-      <div class="day-header">📌 ${day.theme || 'Day ' + day.day} <span style="font-size:13px;color:var(--text-secondary);font-weight:400;">${day.date || ''}${day.city ? ` · ${day.city}` : ''}</span></div>
+      <div class="day-header">📌 ${dayHeaderText} <span style="font-size:13px;color:var(--text-secondary);font-weight:400;">${dayMetaText}</span></div>
       <div class="day-header-actions">
-        <button class="btn-route-day" onclick="startRoute(${index})">▶ Start Route</button>
+        <button class="btn-route-day" onclick="startRoute(${safeIndex})">▶ Start Route</button>
         <button class="btn-route-day" onclick="clearRoute()">✖ Clear Route</button>
-        <button class="btn-replan-day" onclick="replanDay(${index})">🔄 Replan Day</button>
+        <button class="btn-replan-day" onclick="replanDay(${safeIndex})">🔄 Replan Day</button>
       </div>
     </div>`;
 
@@ -518,26 +543,41 @@ function showDay(index, data) {
     card.className = `activity-card glass-card cat-${cat}`;
     card.id = `activity-${index}-${ai}`;
 
-    const bookingHTML = act.bookingLinks ? `
-      <div class="activity-actions">
-        <a href="${act.bookingLinks.googleMaps}" target="_blank" class="action-link">📍 View on Maps</a>
-        <a href="${act.bookingLinks.googleSearch}" target="_blank" class="action-link">🔍 Book</a>
-        ${act.bookingLinks.mapsDirection ? `<a href="${act.bookingLinks.mapsDirection}" target="_blank" class="action-link">🧭 Directions</a>` : ''}
-        <button class="action-link replan-btn" onclick="replanActivity(${index}, ${ai})">🔄 Swap</button>
-        <button class="action-link reorder-btn" onclick="moveActivity(${index}, ${ai}, -1)">↑ Move Up</button>
-        <button class="action-link reorder-btn" onclick="moveActivity(${index}, ${ai}, 1)">↓ Move Down</button>
-        <button class="action-link discard-btn" onclick="discardActivity(${index}, ${ai})">✖ Discard</button>
-        <label class="keep-toggle"><input type="checkbox" ${act.discarded ? '' : 'checked'} onchange="toggleKeep(${index}, ${ai}, this.checked)">Keep</label>
-      </div>` : `<div class="activity-actions"><button class="action-link replan-btn" onclick="replanActivity(${index}, ${ai})">🔄 Swap</button><button class="action-link reorder-btn" onclick="moveActivity(${index}, ${ai}, -1)">↑ Move Up</button><button class="action-link reorder-btn" onclick="moveActivity(${index}, ${ai}, 1)">↓ Move Down</button><button class="action-link discard-btn" onclick="discardActivity(${index}, ${ai})">✖ Discard</button><label class="keep-toggle"><input type="checkbox" ${act.discarded ? '' : 'checked'} onchange="toggleKeep(${index}, ${ai}, this.checked)">Keep</label></div>`;
+    const dIdx = Number(index);
+    const aIdx = Number(ai);
+    const checkedAttr = act.discarded ? '' : 'checked';
+    const controlsHTML = `
+        <button class="action-link replan-btn" onclick="replanActivity(${dIdx}, ${aIdx})">🔄 Swap</button>
+        <button class="action-link reorder-btn" onclick="moveActivity(${dIdx}, ${aIdx}, -1)">↑ Move Up</button>
+        <button class="action-link reorder-btn" onclick="moveActivity(${dIdx}, ${aIdx}, 1)">↓ Move Down</button>
+        <button class="action-link discard-btn" onclick="discardActivity(${dIdx}, ${aIdx})">✖ Discard</button>
+        <label class="keep-toggle"><input type="checkbox" ${checkedAttr} onchange="toggleKeep(${dIdx}, ${aIdx}, this.checked)">Keep</label>`;
 
+    let bookingHTML;
+    if (act.bookingLinks) {
+      const mapsHref = safeUrl(act.bookingLinks.googleMaps);
+      const searchHref = safeUrl(act.bookingLinks.googleSearch);
+      const dirHref = safeUrl(act.bookingLinks.mapsDirection);
+      bookingHTML = `
+      <div class="activity-actions">
+        ${mapsHref ? `<a href="${mapsHref}" target="_blank" rel="noopener noreferrer" class="action-link">📍 View on Maps</a>` : ''}
+        ${searchHref ? `<a href="${searchHref}" target="_blank" rel="noopener noreferrer" class="action-link">🔍 Book</a>` : ''}
+        ${dirHref ? `<a href="${dirHref}" target="_blank" rel="noopener noreferrer" class="action-link">🧭 Directions</a>` : ''}
+        ${controlsHTML}
+      </div>`;
+    } else {
+      bookingHTML = `<div class="activity-actions">${controlsHTML}</div>`;
+    }
+
+    const cost = Number(act.estimatedCost || 0);
     card.innerHTML = `
-      <div class="activity-time">${act.time || ''}</div>
-      <div class="activity-title">${act.title || 'Activity'}</div>
-      <div class="activity-desc">${act.description || ''}</div>
+      <div class="activity-time">${escapeHtml(act.time || '')}</div>
+      <div class="activity-title">${escapeHtml(act.title || 'Activity')}</div>
+      <div class="activity-desc">${escapeHtml(act.description || '')}</div>
       <div class="activity-meta">
-        <span>📍 ${act.location || ''}</span>
-        <span>⏱️ ${act.duration || ''}</span>
-        <span>💰 $${act.estimatedCost || 0}</span>
+        <span>📍 ${escapeHtml(act.location || '')}</span>
+        <span>⏱️ ${escapeHtml(act.duration || '')}</span>
+        <span>💰 $${Number.isFinite(cost) ? cost : 0}</span>
       </div>
       ${bookingHTML}`;
 
@@ -797,8 +837,9 @@ function highlightDayOnMap(day) {
       label: { text: String(i + 1), color: '#fff', fontWeight: '700', fontSize: '12px' },
       icon: { path: google.maps.SymbolPath.CIRCLE, scale: 14, fillColor: colors[act.category] || '#6c5ce7', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2 }
     });
+    const infoCost = Number(act.estimatedCost || 0);
     const infoWindow = new google.maps.InfoWindow({
-      content: `<div style="color:#333;padding:4px;max-width:200px;"><strong>${act.title}</strong><br><small>${act.time} · ${act.duration} · $${act.estimatedCost}</small></div>`
+      content: `<div style="color:#333;padding:4px;max-width:200px;"><strong>${escapeHtml(act.title || '')}</strong><br><small>${escapeHtml(act.time || '')} · ${escapeHtml(act.duration || '')} · $${Number.isFinite(infoCost) ? infoCost : 0}</small></div>`
     });
     marker.addListener('click', () => infoWindow.open(gMap, marker));
     markers.push(marker);

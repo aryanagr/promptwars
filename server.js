@@ -130,17 +130,41 @@ function sanitizeInterests(value) {
   return sanitizeText(value, 300);
 }
 
+function escapeHtml(value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 function getAllowedOrigins() {
   const raw = envValue('CORS_ORIGINS', 'CORS_ORIGIN');
   if (!raw) return [];
   return raw.split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+const CSP_DIRECTIVES = [
+  "default-src 'self'",
+  "script-src 'self' 'unsafe-inline' https://maps.googleapis.com https://maps.gstatic.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "font-src 'self' https://fonts.gstatic.com data:",
+  "img-src 'self' data: blob: https://maps.googleapis.com https://maps.gstatic.com https://*.googleusercontent.com",
+  "connect-src 'self' https://maps.googleapis.com https://maps.gstatic.com https://places.googleapis.com https://routes.googleapis.com",
+  "frame-src 'self' https://www.google.com",
+  "frame-ancestors 'none'",
+  "base-uri 'self'",
+  "form-action 'self'",
+  "object-src 'none'"
+].join('; ');
+
 function securityHeadersMiddleware(req, res, next) {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'DENY');
   res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
   res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=(self)');
+  res.setHeader('Content-Security-Policy', CSP_DIRECTIVES);
   const forwardedProto = req.headers['x-forwarded-proto'];
   const isHttps = req.secure || String(forwardedProto || '').includes('https');
   if (isHttps) {
@@ -276,18 +300,22 @@ function withTimeout(promise, ms, message) {
 
 function itineraryToEmailHtml(itinerary) {
   const daysHtml = (itinerary.days || []).map(day => {
-    const acts = (day.activities || []).map(act => (
-      `<li><strong>${act.time || ''}</strong> - ${act.title || 'Activity'} (${act.location || ''}) | ${act.duration || ''} | $${act.estimatedCost || 0}</li>`
-    )).join('');
-    return `<h3>Day ${day.day}${day.date ? ` - ${day.date}` : ''}</h3><p><strong>${day.theme || ''}</strong></p><ul>${acts}</ul>`;
+    const acts = (Array.isArray(day.activities) ? day.activities : []).map(act => {
+      const cost = Number(act.estimatedCost || 0);
+      return `<li><strong>${escapeHtml(act.time || '')}</strong> - ${escapeHtml(act.title || 'Activity')} (${escapeHtml(act.location || '')}) | ${escapeHtml(act.duration || '')} | $${Number.isFinite(cost) ? cost : 0}</li>`;
+    }).join('');
+    const dayNum = Number(day.day) || '';
+    const dayDate = day.date ? ` - ${escapeHtml(day.date)}` : '';
+    return `<h3>Day ${dayNum}${dayDate}</h3><p><strong>${escapeHtml(day.theme || '')}</strong></p><ul>${acts}</ul>`;
   }).join('');
 
-  const tips = (itinerary.tips || []).map(t => `<li>${t}</li>`).join('');
+  const tips = (Array.isArray(itinerary.tips) ? itinerary.tips : []).map(t => `<li>${escapeHtml(t)}</li>`).join('');
+  const totalCost = Number(itinerary.totalEstimatedCost || 0);
   return `
     <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111;">
-      <h1>${itinerary.tripTitle || 'Trip Itinerary'}</h1>
-      <p>${itinerary.summary || ''}</p>
-      <p><strong>Total Estimated Cost:</strong> $${itinerary.totalEstimatedCost || 0} ${itinerary.currency || 'USD'}</p>
+      <h1>${escapeHtml(itinerary.tripTitle || 'Trip Itinerary')}</h1>
+      <p>${escapeHtml(itinerary.summary || '')}</p>
+      <p><strong>Total Estimated Cost:</strong> $${Number.isFinite(totalCost) ? totalCost : 0} ${escapeHtml(itinerary.currency || 'USD')}</p>
       ${daysHtml}
       <h3>Travel Tips</h3>
       <ul>${tips}</ul>
@@ -394,8 +422,12 @@ function validateItinerary(data) {
         const placeKey = `${act.title}-${act.location}`;
         if (seenPlaces.has(placeKey)) errors.push(`Duplicate place: ${act.title} at ${act.location}`);
         seenPlaces.add(placeKey);
-        if (act.lat && (act.lat < -90 || act.lat > 90)) errors.push(`Invalid lat for ${act.title}`);
-        if (act.lng && (act.lng < -180 || act.lng > 180)) errors.push(`Invalid lng for ${act.title}`);
+        if (act.lat !== undefined && act.lat !== null) {
+          if (!Number.isFinite(act.lat) || act.lat < -90 || act.lat > 90) errors.push(`Invalid lat for ${act.title}`);
+        }
+        if (act.lng !== undefined && act.lng !== null) {
+          if (!Number.isFinite(act.lng) || act.lng < -180 || act.lng > 180) errors.push(`Invalid lng for ${act.title}`);
+        }
       });
     }
   });
@@ -728,11 +760,12 @@ app.post('/api/replan-day', writeApiLimiter, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid day index for replan day.' });
     }
     const reasonSafe = sanitizeText(reason, 220);
-    const destination = day.city || day.activities[0]?.location || 'the destination';
+    const destination = day.city || day.activities?.[0]?.location || 'the destination';
 
     const otherDaysPlaces = itinerary.days
-      .filter((_, i) => i !== dayIndex)
-      .flatMap(d => d.activities.map(a => a.title))
+      .filter((_, i) => i !== safeDayIndex)
+      .flatMap(d => (Array.isArray(d.activities) ? d.activities : []).map(a => a.title))
+      .filter(Boolean)
       .join(', ');
 
     const prompt = `${BASE_PROMPT}\n\nREPLAN REQUEST: Replace ALL activities for Day ${day.day} (${day.date || ''}).\n${reasonSafe ? `Reason: ${reasonSafe}` : ''}\nDestination area: ${destination}\nAVOID these places (already in other days): ${otherDaysPlaces}\nKeep the same date, day number, and city. Return ONLY the single day object as JSON.\n\nReturn format:\n{\n  "day": ${day.day},\n  "date": "${day.date || ''}",\n  "city": "${day.city || destination}",\n  "theme": "New theme",\n  "activities": [ ... ]\n}`;
@@ -960,9 +993,13 @@ app.post('/api/email-itinerary', writeApiLimiter, async (req, res) => {
       auth: { user: cfg.user, pass: cfg.pass }
     });
 
-    const subject = `Your TravelAI Itinerary: ${itinerary.tripTitle || 'Trip Plan'}`;
+    const safeTitle = sanitizeText(itinerary.tripTitle || 'Trip Plan', 160);
+    const safeSummary = sanitizeText(itinerary.summary || '', 500);
+    const safeCurrency = sanitizeText(itinerary.currency || 'USD', 8);
+    const safeTotalCost = Number(itinerary.totalEstimatedCost || 0);
+    const subject = `Your TravelAI Itinerary: ${safeTitle}`;
     const html = itineraryToEmailHtml(itinerary);
-    const text = `Trip: ${itinerary.tripTitle || 'Trip Plan'}\nSummary: ${itinerary.summary || ''}\nEstimated Cost: $${itinerary.totalEstimatedCost || 0} ${itinerary.currency || 'USD'}`;
+    const text = `Trip: ${safeTitle}\nSummary: ${safeSummary}\nEstimated Cost: $${Number.isFinite(safeTotalCost) ? safeTotalCost : 0} ${safeCurrency}`;
 
     await transporter.sendMail({
       from: cfg.from,
