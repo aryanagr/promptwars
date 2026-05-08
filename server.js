@@ -10,69 +10,33 @@ app.use(cors());
 app.use(express.json());
 app.use(express.static('public'));
 
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-
-function hasValidGeminiKey() {
-  const key = process.env.GEMINI_API_KEY;
-  return Boolean(
-    key &&
-    key.trim() &&
-    key !== 'your_gemini_api_key_here'
-  );
+function getGeminiApiKey() {
+  return (
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.GEMINI_KEY ||
+    ''
+  ).trim();
 }
 
-// --- Helpers ---
+function hasValidGeminiKey() {
+  const key = getGeminiApiKey();
+  return Boolean(key && key !== 'your_gemini_api_key_here');
+}
+
+function getModel() {
+  const key = getGeminiApiKey();
+  if (!hasValidGeminiKey()) {
+    throw new Error('GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.');
+  }
+  const genAI = new GoogleGenerativeAI(key);
+  return genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+}
+
 function formatApiError(error, fallbackMessage) {
   const providerMessage = error?.message || error?.errorDetails?.[0]?.message;
   if (providerMessage) return `${fallbackMessage} (${providerMessage})`;
   return fallbackMessage;
-}
-
-function buildFallbackItinerary({ destination, startDate, budget }) {
-  const city = destination || 'Your Destination';
-  const d0 = new Date(startDate || Date.now());
-  const day2 = new Date(d0);
-  day2.setDate(d0.getDate() + 1);
-  const total = Number(budget) || 800;
-  const slot = Math.max(20, Math.floor(total / 8));
-
-  return {
-    tripTitle: `${city} Quick Explorer`,
-    summary: `Generated in fallback mode for ${city}. Add GEMINI_API_KEY anytime for fully personalized AI results.`,
-    totalEstimatedCost: slot * 8,
-    currency: 'USD',
-    tips: [
-      'Start early to reduce queues.',
-      'Keep buffer time between places.',
-      'Pre-check opening hours.',
-      'Use public transport in peak areas.',
-      'Keep offline map downloaded.'
-    ],
-    days: [
-      {
-        day: 1,
-        date: d0.toISOString().split('T')[0],
-        theme: `Highlights of ${city}`,
-        activities: [
-          { time: '09:00 AM', title: 'Historic Core Walk', description: 'Explore key landmarks and old streets.', location: `${city} Old Town`, lat: 28.6139, lng: 77.2090, duration: '2 hours', estimatedCost: slot, category: 'culture' },
-          { time: '12:30 PM', title: 'Local Lunch', description: 'Taste popular local dishes.', location: `${city} Central Market`, lat: 28.6129, lng: 77.2295, duration: '1.5 hours', estimatedCost: slot, category: 'food' },
-          { time: '03:00 PM', title: 'Main Attraction', description: 'Visit one iconic place in the city.', location: `${city} Landmark Plaza`, lat: 28.6120, lng: 77.2310, duration: '2 hours', estimatedCost: slot, category: 'sightseeing' },
-          { time: '07:00 PM', title: 'Evening Promenade', description: 'Relax with sunset and city lights.', location: `${city} Riverside`, lat: 28.6070, lng: 77.2420, duration: '1.5 hours', estimatedCost: slot, category: 'relaxation' }
-        ]
-      },
-      {
-        day: 2,
-        date: day2.toISOString().split('T')[0],
-        theme: `Culture & Food in ${city}`,
-        activities: [
-          { time: '09:30 AM', title: 'Museum Stop', description: 'Discover local history and arts.', location: `${city} Museum District`, lat: 28.6110, lng: 77.2190, duration: '2 hours', estimatedCost: slot, category: 'culture' },
-          { time: '01:00 PM', title: 'Street Food Trail', description: 'Curated tasting across local stalls.', location: `${city} Bazaar Lane`, lat: 28.6500, lng: 77.2300, duration: '2 hours', estimatedCost: slot, category: 'food' },
-          { time: '04:00 PM', title: 'Craft Market', description: 'Buy handcrafted souvenirs.', location: `${city} Craft Market`, lat: 28.6320, lng: 77.2170, duration: '1.5 hours', estimatedCost: slot, category: 'shopping' },
-          { time: '08:00 PM', title: 'Cultural Evening', description: 'Local performance or live arts.', location: `${city} Cultural Center`, lat: 28.6200, lng: 77.2080, duration: '2 hours', estimatedCost: slot, category: 'culture' }
-        ]
-      }
-    ]
-  };
 }
 
 const ITINERARY_SCHEMA = {
@@ -100,11 +64,9 @@ function validateItinerary(data) {
         for (const f of ITINERARY_SCHEMA.activityRequired) {
           if (!act[f] && act[f] !== 0) errors.push(`Day ${di + 1}, Activity ${ai + 1}: missing ${f}`);
         }
-        // Check for duplicate places
         const placeKey = `${act.title}-${act.location}`;
         if (seenPlaces.has(placeKey)) errors.push(`Duplicate place: ${act.title} at ${act.location}`);
         seenPlaces.add(placeKey);
-        // Check coords are valid
         if (act.lat && (act.lat < -90 || act.lat > 90)) errors.push(`Invalid lat for ${act.title}`);
         if (act.lng && (act.lng < -180 || act.lng > 180)) errors.push(`Invalid lng for ${act.title}`);
       });
@@ -115,7 +77,6 @@ function validateItinerary(data) {
 
 function cleanAndParseJSON(text) {
   let cleaned = text.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
-  // Try to find JSON object in the text
   const jsonStart = cleaned.indexOf('{');
   const jsonEnd = cleaned.lastIndexOf('}');
   if (jsonStart !== -1 && jsonEnd !== -1) {
@@ -183,7 +144,7 @@ RESPOND IN THIS EXACT JSON FORMAT (no markdown, no code blocks, just raw JSON):
 }`;
 
 async function generateWithRetry(prompt, maxRetries = 2) {
-  const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+  const model = getModel();
   let lastError = null;
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
@@ -196,7 +157,7 @@ async function generateWithRetry(prompt, maxRetries = 2) {
 
       if (errors.length > 0 && attempt < maxRetries) {
         console.warn(`Attempt ${attempt + 1} validation errors:`, errors);
-        continue; // Retry
+        continue;
       }
       if (errors.length > 0) {
         console.warn('Validation warnings (serving anyway):', errors);
@@ -211,13 +172,18 @@ async function generateWithRetry(prompt, maxRetries = 2) {
   throw lastError;
 }
 
-// --- Routes ---
-
 app.get('/api/maps-key', (req, res) => {
   res.json({ key: process.env.GOOGLE_MAPS_API_KEY });
 });
 
-// Main itinerary generation
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    geminiConfigured: hasValidGeminiKey(),
+    mapsConfigured: Boolean((process.env.GOOGLE_MAPS_API_KEY || '').trim())
+  });
+});
+
 app.post('/api/generate-itinerary', async (req, res) => {
   try {
     const { destination, startDate, endDate, budget, travelers, interests } = req.body;
@@ -227,36 +193,20 @@ app.post('/api/generate-itinerary', async (req, res) => {
     }
 
     if (!hasValidGeminiKey()) {
-      const itinerary = enrichWithBookingLinks(
-        buildFallbackItinerary({ destination, startDate, budget })
-      );
-      return res.json({ success: true, itinerary, fallbackMode: true });
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.' });
     }
 
-    const prompt = `${BASE_PROMPT}
-
-TRIP DETAILS:
-- Destination: ${destination}
-- Start Date: ${startDate}
-- End Date: ${endDate}
-- Budget: $${budget} USD total
-- Number of Travelers: ${travelers || 1}
-- Interests: ${interests || 'General sightseeing, local food, culture'}`;
+    const prompt = `${BASE_PROMPT}\n\nTRIP DETAILS:\n- Destination: ${destination}\n- Start Date: ${startDate}\n- End Date: ${endDate}\n- Budget: $${budget} USD total\n- Number of Travelers: ${travelers || 1}\n- Interests: ${interests || 'General sightseeing, local food, culture'}`;
 
     const itinerary = await generateWithRetry(prompt);
     const enriched = enrichWithBookingLinks(itinerary);
-
     res.json({ success: true, itinerary: enriched });
   } catch (error) {
     console.error('Error generating itinerary:', error);
-    res.status(500).json({
-      success: false,
-      error: formatApiError(error, 'Failed to generate itinerary')
-    });
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to generate itinerary') });
   }
 });
 
-// Replan a specific activity slot
 app.post('/api/replan-activity', async (req, res) => {
   try {
     const { itinerary, dayIndex, activityIndex, reason } = req.body;
@@ -265,21 +215,7 @@ app.post('/api/replan-activity', async (req, res) => {
     }
 
     if (!hasValidGeminiKey()) {
-      const day = itinerary.days[dayIndex];
-      const activity = day.activities[activityIndex];
-      const replacement = {
-        ...activity,
-        title: `Alternative: ${activity.title}`,
-        description: `Fallback replacement${reason ? ` (${reason})` : ''}. Add GEMINI_API_KEY for AI replacement.`
-      };
-      const query = encodeURIComponent(`${replacement.title} ${replacement.location}`);
-      replacement.bookingLinks = {
-        googleMaps: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(replacement.location)}`,
-        googleSearch: `https://www.google.com/search?q=${query}+booking`,
-        mapsDirection: replacement.lat && replacement.lng ? `https://www.google.com/maps/dir/?api=1&destination=${replacement.lat},${replacement.lng}` : null
-      };
-      itinerary.days[dayIndex].activities[activityIndex] = replacement;
-      return res.json({ success: true, itinerary, fallbackMode: true });
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.' });
     }
 
     const day = itinerary.days[dayIndex];
@@ -290,7 +226,7 @@ app.post('/api/replan-activity', async (req, res) => {
       .map(a => a.title)
       .join(', ');
 
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = getModel();
     const prompt = `You are a travel planner. Replace ONE activity in an itinerary.
 
 CURRENT ACTIVITY TO REPLACE:
@@ -321,7 +257,6 @@ Return ONLY a single JSON object for the replacement activity (no markdown, no c
     const text = result.response.text();
     const newActivity = cleanAndParseJSON(text);
 
-    // Add booking links
     const query = encodeURIComponent(`${newActivity.title} ${newActivity.location}`);
     newActivity.bookingLinks = {
       googleMaps: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(newActivity.location)}`,
@@ -329,9 +264,7 @@ Return ONLY a single JSON object for the replacement activity (no markdown, no c
       mapsDirection: newActivity.lat && newActivity.lng ? `https://www.google.com/maps/dir/?api=1&destination=${newActivity.lat},${newActivity.lng}` : null
     };
 
-    // Update itinerary
     itinerary.days[dayIndex].activities[activityIndex] = newActivity;
-
     res.json({ success: true, itinerary, replacedActivity: activity, newActivity });
   } catch (error) {
     console.error('Error replanning:', error);
@@ -339,22 +272,13 @@ Return ONLY a single JSON object for the replacement activity (no markdown, no c
   }
 });
 
-// Replan entire day
 app.post('/api/replan-day', async (req, res) => {
   try {
     const { itinerary, dayIndex, reason } = req.body;
     if (!hasValidGeminiKey()) {
-      const first = itinerary.days[dayIndex]?.activities?.[0];
-      const city = first?.location || 'Your Destination';
-      const budget = itinerary.totalEstimatedCost || 800;
-      const fallback = enrichWithBookingLinks(buildFallbackItinerary({
-        destination: city,
-        startDate: itinerary.days[dayIndex]?.date,
-        budget
-      }));
-      itinerary.days[dayIndex] = fallback.days[0];
-      return res.json({ success: true, itinerary, fallbackMode: true });
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.' });
     }
+
     const day = itinerary.days[dayIndex];
     const destination = day.activities[0]?.location || 'the destination';
 
@@ -363,23 +287,9 @@ app.post('/api/replan-day', async (req, res) => {
       .flatMap(d => d.activities.map(a => a.title))
       .join(', ');
 
-    const prompt = `${BASE_PROMPT}
+    const prompt = `${BASE_PROMPT}\n\nREPLAN REQUEST: Replace ALL activities for Day ${day.day} (${day.date || ''}).\n${reason ? `Reason: ${reason}` : ''}\nDestination area: ${destination}\nAVOID these places (already in other days): ${otherDaysPlaces}\nKeep the same date and day number. Return ONLY the single day object as JSON.\n\nReturn format:\n{\n  "day": ${day.day},\n  "date": "${day.date || ''}",\n  "theme": "New theme",\n  "activities": [ ... ]\n}`;
 
-REPLAN REQUEST: Replace ALL activities for Day ${day.day} (${day.date || ''}).
-${reason ? `Reason: ${reason}` : ''}
-Destination area: ${destination}
-AVOID these places (already in other days): ${otherDaysPlaces}
-Keep the same date and day number. Return ONLY the single day object as JSON.
-
-Return format:
-{
-  "day": ${day.day},
-  "date": "${day.date || ''}",
-  "theme": "New theme",
-  "activities": [ ... ]
-}`;
-
-    const model = genAI.getGenerativeModel({ model: 'gemini-2.0-flash' });
+    const model = getModel();
     const result = await model.generateContent(prompt);
     const text = result.response.text();
     const newDay = cleanAndParseJSON(text);
@@ -395,5 +305,5 @@ Return format:
 });
 
 app.listen(PORT, () => {
-  console.log(`🚀 Travel Planner running at http://localhost:${PORT}`);
+  console.log(`Travel Planner running at http://localhost:${PORT}`);
 });
