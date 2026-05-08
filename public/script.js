@@ -49,7 +49,18 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
       signal: controller.signal
     });
     clearTimeout(timeout);
-    const data = await res.json();
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (parseErr) {
+      throw new Error(`Invalid API response (${res.status}).`);
+    }
+
+    if (!res.ok || !data?.success) {
+      showError(data?.error || `Request failed (${res.status}).`);
+      return;
+    }
+
     if (data.success) {
       itineraryData = data.itinerary;
       try {
@@ -63,13 +74,13 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
       if (!mapsReady) {
         showError('Itinerary generated, but Google Maps failed to load. Check Maps API key/referrer settings.');
       }
-    } else {
-      showError(data.error || 'Failed to generate. Try again.');
     }
   } catch (err) {
     clearTimeout(timeout);
     if (err.name === 'AbortError') {
       showError('Request timed out. The AI took too long — please try again.');
+    } else if (err?.message) {
+      showError(err.message);
     } else {
       showError('Network error. Check your connection and try again.');
     }
