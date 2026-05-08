@@ -12,6 +12,15 @@ app.use(express.static('public'));
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+function hasValidGeminiKey() {
+  const key = process.env.GEMINI_API_KEY;
+  return Boolean(
+    key &&
+    key.trim() &&
+    key !== 'your_gemini_api_key_here'
+  );
+}
+
 // --- Helpers ---
 
 const ITINERARY_SCHEMA = {
@@ -159,6 +168,13 @@ app.get('/api/maps-key', (req, res) => {
 // Main itinerary generation
 app.post('/api/generate-itinerary', async (req, res) => {
   try {
+    if (!hasValidGeminiKey()) {
+      return res.status(500).json({
+        success: false,
+        error: 'GEMINI_API_KEY is not configured. Update .env with a real Gemini API key.'
+      });
+    }
+
     const { destination, startDate, endDate, budget, travelers, interests } = req.body;
 
     if (!destination || !startDate || !endDate || !budget) {
@@ -191,6 +207,13 @@ TRIP DETAILS:
 // Replan a specific activity slot
 app.post('/api/replan-activity', async (req, res) => {
   try {
+    if (!hasValidGeminiKey()) {
+      return res.status(500).json({
+        success: false,
+        error: 'GEMINI_API_KEY is not configured. Update .env with a real Gemini API key.'
+      });
+    }
+
     const { itinerary, dayIndex, activityIndex, reason } = req.body;
     const day = itinerary.days[dayIndex];
     const activity = day.activities[activityIndex];
