@@ -227,40 +227,34 @@ function enrichWithBookingLinks(itinerary) {
   return itinerary;
 }
 
-const BASE_PROMPT = `You are an expert travel planner with deep knowledge of destinations worldwide. Create a detailed, personalized travel itinerary.
-
-IMPORTANT RULES:
-1. Create a day-by-day itinerary with specific places, times, and estimated costs.
-2. Include a mix of popular attractions and hidden gems based on the traveler's interests.
-3. Provide ACCURATE latitude and longitude coordinates for each place — these MUST be real coordinates.
-4. Keep the total estimated cost within the budget.
-5. Include breakfast, lunch, and dinner recommendations each day.
-6. Add practical travel tips specific to the destination.
-7. Do NOT repeat the same place across multiple days.
-8. Ensure activities don't overlap in time — leave travel time between locations.
-9. Consider typical opening hours for each venue.
-
-RESPOND IN THIS EXACT JSON FORMAT (no markdown, no code blocks, just raw JSON):
+const BASE_PROMPT = `Create a concise travel itinerary in raw JSON only (no markdown).
+Rules:
+- Day-wise plan with realistic times and costs.
+- Include varied activities matching interests.
+- Use real coordinates.
+- Stay within budget.
+- Avoid duplicate places.
+Format:
 {
-  "tripTitle": "Amazing trip title",
-  "summary": "2-3 sentence trip overview",
+  "tripTitle": "string",
+  "summary": "string",
   "totalEstimatedCost": 0,
   "currency": "USD",
-  "tips": ["tip1", "tip2", "tip3", "tip4", "tip5"],
+  "tips": ["tip1","tip2","tip3"],
   "days": [
     {
       "day": 1,
       "date": "YYYY-MM-DD",
-      "theme": "Day theme/title",
+      "theme": "string",
       "activities": [
         {
           "time": "09:00 AM",
-          "title": "Activity name",
-          "description": "Brief description of the activity and why it's recommended",
-          "location": "Full place name and area",
+          "title": "string",
+          "description": "string",
+          "location": "string",
           "lat": 0.0,
           "lng": 0.0,
-          "duration": "2 hours",
+          "duration": "90 mins",
           "estimatedCost": 0,
           "category": "sightseeing|food|adventure|culture|shopping|transport|relaxation"
         }
@@ -269,7 +263,7 @@ RESPOND IN THIS EXACT JSON FORMAT (no markdown, no code blocks, just raw JSON):
   ]
 }`;
 
-async function generateWithRetry(prompt, maxRetries = 2) {
+async function generateWithRetry(prompt, maxRetries = 0) {
   const model = getModel();
   let lastError = null;
 
@@ -277,7 +271,7 @@ async function generateWithRetry(prompt, maxRetries = 2) {
     try {
       const result = await withTimeout(
         model.generateContent(prompt),
-        25000,
+        12000,
         'AI is taking too long to respond. Please try again.'
       );
       const response = await result.response;
@@ -285,13 +279,7 @@ async function generateWithRetry(prompt, maxRetries = 2) {
       const itinerary = cleanAndParseJSON(text);
       const errors = validateItinerary(itinerary);
 
-      if (errors.length > 0 && attempt < maxRetries) {
-        console.warn(`Attempt ${attempt + 1} validation errors:`, errors);
-        continue;
-      }
-      if (errors.length > 0) {
-        console.warn('Validation warnings (serving anyway):', errors);
-      }
+      if (errors.length > 0) console.warn('Validation warnings (serving anyway):', errors);
       return itinerary;
     } catch (err) {
       lastError = err;
