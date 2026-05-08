@@ -1,4 +1,4 @@
-let map, markers = [], itineraryData = null, currentDayIndex = 0;
+let map, markers = [], itineraryData = null, currentDayIndex = 0, mapsReady = false;
 
 // Set default dates
 document.addEventListener('DOMContentLoaded', () => {
@@ -52,8 +52,17 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
     const data = await res.json();
     if (data.success) {
       itineraryData = data.itinerary;
-      await loadMapsAPI();
+      try {
+        await loadMapsAPI();
+        mapsReady = true;
+      } catch (mapErr) {
+        mapsReady = false;
+        console.error('Google Maps load failed:', mapErr);
+      }
       renderResults(data.itinerary);
+      if (!mapsReady) {
+        showError('Itinerary generated, but Google Maps failed to load. Check Maps API key/referrer settings.');
+      }
     } else {
       showError(data.error || 'Failed to generate. Try again.');
     }
@@ -134,6 +143,9 @@ async function loadMapsAPI() {
   if (window.google && window.google.maps) return;
   const res = await fetch('/api/maps-key');
   const { key } = await res.json();
+  if (!key || typeof key !== 'string' || !key.trim()) {
+    throw new Error('Missing GOOGLE_MAPS_API_KEY');
+  }
   return new Promise((resolve, reject) => {
     const script = document.createElement('script');
     script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=marker`;
@@ -182,7 +194,14 @@ function renderResults(data) {
   }
 
   showDay(0, data);
-  initMap(data);
+  if (mapsReady) {
+    initMap(data);
+  } else {
+    const mapEl = document.getElementById('map');
+    if (mapEl) {
+      mapEl.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#a0a0c0;padding:16px;text-align:center;">Map unavailable. Configure a valid Google Maps API key and allowed referrers.</div>';
+    }
+  }
 }
 
 function showDay(index, data) {
@@ -241,7 +260,7 @@ function showDay(index, data) {
   });
 
   content.appendChild(section);
-  highlightDayOnMap(day);
+  if (mapsReady) highlightDayOnMap(day);
 }
 
 // Replan activity
