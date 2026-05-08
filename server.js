@@ -1,8 +1,14 @@
-require('dotenv').config();
+const fs = require('fs');
+const dotenv = require('dotenv');
 const express = require('express');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const nodemailer = require('nodemailer');
+
+const isCloudRun = Boolean(process.env.K_SERVICE);
+if (!isCloudRun) {
+  dotenv.config();
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -17,27 +23,42 @@ app.use((req, res, next) => {
 });
 app.use(express.static('public'));
 
+function readFromFileEnv(name) {
+  const filePath = process.env[`${name}_FILE`];
+  if (!filePath) return '';
+  try {
+    return fs.readFileSync(filePath, 'utf8').trim();
+  } catch {
+    return '';
+  }
+}
+
+function envValue(...names) {
+  for (const name of names) {
+    const direct = (process.env[name] || '').trim();
+    if (direct) return direct;
+    const fromFile = readFromFileEnv(name);
+    if (fromFile) return fromFile;
+  }
+  return '';
+}
+
 function getGeminiApiKey() {
-  return (
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.GEMINI_KEY ||
-    ''
-  ).trim();
+  return envValue('GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GEMINI_KEY');
 }
 
 function getMapsApiKey() {
-  return (process.env.GOOGLE_MAPS_API_KEY || '').trim();
+  return envValue('GOOGLE_MAPS_API_KEY', 'MAPS_API_KEY');
 }
 
 function getMailerConfig() {
   return {
-    host: (process.env.SMTP_HOST || '').trim(),
-    port: Number(process.env.SMTP_PORT || 587),
-    secure: String(process.env.SMTP_SECURE || 'false').toLowerCase() === 'true',
-    user: (process.env.SMTP_USER || '').trim(),
-    pass: (process.env.SMTP_PASS || '').trim(),
-    from: (process.env.MAIL_FROM || process.env.SMTP_USER || '').trim()
+    host: envValue('SMTP_HOST'),
+    port: Number(envValue('SMTP_PORT') || 587),
+    secure: String(envValue('SMTP_SECURE') || 'false').toLowerCase() === 'true',
+    user: envValue('SMTP_USER'),
+    pass: envValue('SMTP_PASS'),
+    from: envValue('MAIL_FROM') || envValue('SMTP_USER')
   };
 }
 
@@ -59,7 +80,7 @@ function hasValidMailerConfig() {
 function getModel() {
   const key = getGeminiApiKey();
   if (!hasValidGeminiKey()) {
-    throw new Error('GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.');
+    throw new Error('GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).');
   }
   const genAI = new GoogleGenerativeAI(key);
   return genAI.getGenerativeModel({
@@ -345,8 +366,9 @@ app.get('/api/maps-key', (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     ok: true,
+    runtime: isCloudRun ? 'cloud-run' : 'local',
     geminiConfigured: hasValidGeminiKey(),
-    mapsConfigured: Boolean((process.env.GOOGLE_MAPS_API_KEY || '').trim())
+    mapsConfigured: hasValidMapsKey()
   });
 });
 
@@ -370,7 +392,7 @@ app.post('/api/generate-itinerary', async (req, res) => {
     }
 
     if (!hasValidGeminiKey()) {
-      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.' });
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
 
     const prompt = `${BASE_PROMPT}\n\nTRIP DETAILS:\n- From: ${fromPlace}\n- To: ${toPlace}\n- Destination Area: ${destination}\n- Start Date: ${startDate}\n- End Date: ${endDate}\n- Budget: $${budget} USD total\n- Number of Travelers: ${travelers || 1}\n- Interests: ${interests || 'General sightseeing, local food, culture'}\n- Preferred Transport Mode: ${transportMode || 'driving'}\n- Need Transport Booking Options: ${transportBookingRequired ? 'yes' : 'no'}\n\nAlso include practical movement between activities considering the preferred transport mode.`;
@@ -392,7 +414,7 @@ app.post('/api/replan-activity', async (req, res) => {
     }
 
     if (!hasValidGeminiKey()) {
-      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.' });
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
 
     const day = itinerary.days[dayIndex];
@@ -457,7 +479,7 @@ app.post('/api/replan-day', async (req, res) => {
   try {
     const { itinerary, dayIndex, reason } = req.body;
     if (!hasValidGeminiKey()) {
-      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.' });
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
 
     const day = itinerary.days[dayIndex];
@@ -612,7 +634,7 @@ app.post('/api/apply-constraints', async (req, res) => {
 app.post('/api/replan-segment', async (req, res) => {
   try {
     if (!hasValidGeminiKey()) {
-      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.' });
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
     const { itinerary, dayIndex, startActivityIndex, endActivityIndex, reason, constraints = {} } = req.body;
     if (!itinerary?.days || dayIndex === undefined || startActivityIndex === undefined || endActivityIndex === undefined) {
