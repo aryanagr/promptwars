@@ -1,4 +1,4 @@
-let map, markers = [], itineraryData = null;
+let map, markers = [], itineraryData = null, currentDayIndex = 0;
 
 // Set default dates
 document.addEventListener('DOMContentLoaded', () => {
@@ -37,27 +37,54 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
     interests
   };
 
+  // Timeout controller - 60 second max
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 60000);
+
   try {
     const res = await fetch('/api/generate-itinerary', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
+      body: JSON.stringify(payload),
+      signal: controller.signal
     });
+    clearTimeout(timeout);
     const data = await res.json();
     if (data.success) {
       itineraryData = data.itinerary;
       await loadMapsAPI();
       renderResults(data.itinerary);
     } else {
-      alert('Error: ' + data.error);
-      resetForm();
+      showError(data.error || 'Failed to generate. Try again.');
     }
   } catch (err) {
-    console.error(err);
-    alert('Failed to generate itinerary. Check your API keys and try again.');
-    resetForm();
+    clearTimeout(timeout);
+    if (err.name === 'AbortError') {
+      showError('Request timed out. The AI took too long — please try again.');
+    } else {
+      showError('Network error. Check your connection and try again.');
+    }
   }
 });
+
+function showError(msg) {
+  document.getElementById('loading-section').style.display = 'none';
+  document.getElementById('hero').style.display = 'flex';
+  const btn = document.getElementById('generate-btn');
+  btn.querySelector('.btn-text').style.display = 'inline';
+  btn.querySelector('.btn-loader').style.display = 'none';
+  btn.disabled = false;
+
+  // Show toast
+  const toast = document.createElement('div');
+  toast.className = 'error-toast';
+  toast.innerHTML = `⚠️ ${msg}`;
+  document.body.appendChild(toast);
+  setTimeout(() => { toast.classList.add('show'); }, 10);
+  setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 400); }, 5000);
+
+  resetLoadingSteps();
+}
 
 function resetForm() {
   document.getElementById('hero').style.display = 'flex';
@@ -67,16 +94,30 @@ function resetForm() {
   btn.querySelector('.btn-text').style.display = 'inline';
   btn.querySelector('.btn-loader').style.display = 'none';
   btn.disabled = false;
+  resetLoadingSteps();
+}
+
+function resetLoadingSteps() {
+  ['step-1','step-2','step-3','step-4'].forEach(id => {
+    const el = document.getElementById(id);
+    el.classList.remove('active','done');
+  });
+  document.getElementById('step-1').textContent = '🔍 Researching destination';
+  document.getElementById('step-2').textContent = '📍 Finding best locations';
+  document.getElementById('step-3').textContent = '📋 Building day-by-day plan';
+  document.getElementById('step-4').textContent = '💰 Optimizing for budget';
+  document.getElementById('step-1').classList.add('active');
 }
 
 function animateLoadingSteps() {
   const steps = ['step-1','step-2','step-3','step-4'];
+  const labels = ['🔍 Researching destination','📍 Finding best locations','📋 Building day-by-day plan','💰 Optimizing for budget'];
   let i = 0;
   const interval = setInterval(() => {
     if (i > 0) {
       document.getElementById(steps[i-1]).classList.remove('active');
       document.getElementById(steps[i-1]).classList.add('done');
-      document.getElementById(steps[i-1]).textContent = '✅ ' + document.getElementById(steps[i-1]).textContent.slice(2);
+      document.getElementById(steps[i-1]).textContent = '✅ ' + labels[i-1].slice(2);
     }
     if (i < steps.length) {
       document.getElementById(steps[i]).classList.add('active');
@@ -85,9 +126,10 @@ function animateLoadingSteps() {
       clearInterval(interval);
     }
   }, 2500);
+  window._loadingInterval = interval;
 }
 
-// Load Google Maps dynamically
+// Load Google Maps
 async function loadMapsAPI() {
   if (window.google && window.google.maps) return;
   const res = await fetch('/api/maps-key');
@@ -97,21 +139,22 @@ async function loadMapsAPI() {
     script.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=marker`;
     script.async = true;
     script.onload = resolve;
-    script.onerror = reject;
+    script.onerror = () => reject(new Error('Failed to load Google Maps'));
     document.head.appendChild(script);
   });
 }
 
 // Render results
 function renderResults(data) {
+  if (window._loadingInterval) clearInterval(window._loadingInterval);
   document.getElementById('loading-section').style.display = 'none';
   document.getElementById('results-section').style.display = 'block';
 
-  document.getElementById('trip-title').textContent = data.tripTitle;
-  document.getElementById('trip-summary').textContent = data.summary;
+  document.getElementById('trip-title').textContent = data.tripTitle || 'Your Trip';
+  document.getElementById('trip-summary').textContent = data.summary || '';
 
   let totalPlaces = 0;
-  data.days.forEach(d => totalPlaces += d.activities.length);
+  data.days.forEach(d => totalPlaces += (d.activities || []).length);
   document.getElementById('stat-days').textContent = data.days.length;
   document.getElementById('stat-places').textContent = totalPlaces;
   document.getElementById('stat-cost').textContent = '$' + (data.totalEstimatedCost || 0);
@@ -143,7 +186,7 @@ function renderResults(data) {
 }
 
 function showDay(index, data) {
-  // Update tabs
+  currentDayIndex = index;
   document.querySelectorAll('.day-tab').forEach((t, i) => {
     t.classList.toggle('active', i === index);
   });
@@ -154,22 +197,41 @@ function showDay(index, data) {
 
   const section = document.createElement('div');
   section.className = 'day-section';
-  section.innerHTML = `<div class="day-header">📌 ${day.theme || 'Day ' + day.day} <span style="font-size:13px;color:var(--text-secondary);font-weight:400;">${day.date || ''}</span></div>`;
 
-  day.activities.forEach(act => {
+  // Day header with replan button
+  section.innerHTML = `
+    <div class="day-header-row">
+      <div class="day-header">📌 ${day.theme || 'Day ' + day.day} <span style="font-size:13px;color:var(--text-secondary);font-weight:400;">${day.date || ''}</span></div>
+      <button class="btn-replan-day" onclick="replanDay(${index})">🔄 Replan Day</button>
+    </div>`;
+
+  (day.activities || []).forEach((act, ai) => {
     const cat = (act.category || '').toLowerCase();
     const card = document.createElement('div');
     card.className = `activity-card glass-card cat-${cat}`;
+    card.id = `activity-${index}-${ai}`;
+
+    const bookingHTML = act.bookingLinks ? `
+      <div class="activity-actions">
+        <a href="${act.bookingLinks.googleMaps}" target="_blank" class="action-link">📍 View on Maps</a>
+        <a href="${act.bookingLinks.googleSearch}" target="_blank" class="action-link">🔍 Book</a>
+        ${act.bookingLinks.mapsDirection ? `<a href="${act.bookingLinks.mapsDirection}" target="_blank" class="action-link">🧭 Directions</a>` : ''}
+        <button class="action-link replan-btn" onclick="replanActivity(${index}, ${ai})">🔄 Swap</button>
+      </div>` : `<div class="activity-actions"><button class="action-link replan-btn" onclick="replanActivity(${index}, ${ai})">🔄 Swap</button></div>`;
+
     card.innerHTML = `
-      <div class="activity-time">${act.time}</div>
-      <div class="activity-title">${act.title}</div>
-      <div class="activity-desc">${act.description}</div>
+      <div class="activity-time">${act.time || ''}</div>
+      <div class="activity-title">${act.title || 'Activity'}</div>
+      <div class="activity-desc">${act.description || ''}</div>
       <div class="activity-meta">
-        <span>📍 ${act.location}</span>
-        <span>⏱️ ${act.duration}</span>
-        <span>💰 $${act.estimatedCost}</span>
-      </div>`;
-    card.addEventListener('click', () => {
+        <span>📍 ${act.location || ''}</span>
+        <span>⏱️ ${act.duration || ''}</span>
+        <span>💰 $${act.estimatedCost || 0}</span>
+      </div>
+      ${bookingHTML}`;
+
+    card.addEventListener('click', (e) => {
+      if (e.target.closest('a') || e.target.closest('button')) return;
       if (map && act.lat && act.lng) {
         map.panTo({ lat: act.lat, lng: act.lng });
         map.setZoom(15);
@@ -179,14 +241,68 @@ function showDay(index, data) {
   });
 
   content.appendChild(section);
-
-  // Update map markers for this day
   highlightDayOnMap(day);
+}
+
+// Replan activity
+async function replanActivity(dayIndex, activityIndex) {
+  const card = document.getElementById(`activity-${dayIndex}-${activityIndex}`);
+  if (card) card.style.opacity = '0.5';
+
+  const reason = prompt('Why do you want to change this? (optional)') || '';
+
+  try {
+    const res = await fetch('/api/replan-activity', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ itinerary: itineraryData, dayIndex, activityIndex, reason })
+    });
+    const data = await res.json();
+    if (data.success) {
+      itineraryData = data.itinerary;
+      showDay(dayIndex, itineraryData);
+      // Flash effect on new card
+      const newCard = document.getElementById(`activity-${dayIndex}-${activityIndex}`);
+      if (newCard) { newCard.classList.add('just-replaced'); setTimeout(() => newCard.classList.remove('just-replaced'), 2000); }
+    } else {
+      if (card) card.style.opacity = '1';
+      showError('Failed to swap activity. Try again.');
+    }
+  } catch (err) {
+    if (card) card.style.opacity = '1';
+    showError('Network error during replan.');
+  }
+}
+
+// Replan day
+async function replanDay(dayIndex) {
+  const reason = prompt('What would you prefer for this day? (optional)') || '';
+  const content = document.getElementById('itinerary-content');
+  content.innerHTML = '<div class="replan-loading"><span class="spinner"></span> Replanning day...</div>';
+
+  try {
+    const res = await fetch('/api/replan-day', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ itinerary: itineraryData, dayIndex, reason })
+    });
+    const data = await res.json();
+    if (data.success) {
+      itineraryData = data.itinerary;
+      showDay(dayIndex, itineraryData);
+    } else {
+      showDay(dayIndex, itineraryData);
+      showError('Failed to replan day.');
+    }
+  } catch (err) {
+    showDay(dayIndex, itineraryData);
+    showError('Network error during replan.');
+  }
 }
 
 function initMap(data) {
   const allCoords = [];
-  data.days.forEach(d => d.activities.forEach(a => {
+  data.days.forEach(d => (d.activities || []).forEach(a => {
     if (a.lat && a.lng) allCoords.push({ lat: a.lat, lng: a.lng });
   }));
 
@@ -195,8 +311,7 @@ function initMap(data) {
     : { lat: 0, lng: 0 };
 
   map = new google.maps.Map(document.getElementById('map'), {
-    center,
-    zoom: 12,
+    center, zoom: 12,
     styles: [
       { elementType: 'geometry', stylers: [{ color: '#1d1d3b' }] },
       { elementType: 'labels.text.stroke', stylers: [{ color: '#1d1d3b' }] },
@@ -207,16 +322,15 @@ function initMap(data) {
       { featureType: 'poi', elementType: 'labels.text.fill', stylers: [{ color: '#6c5ce7' }] },
       { featureType: 'transit', elementType: 'geometry', stylers: [{ color: '#2c2c54' }] }
     ],
-    disableDefaultUI: true,
-    zoomControl: true
+    disableDefaultUI: true, zoomControl: true
   });
-
   highlightDayOnMap(data.days[0]);
 }
 
 function highlightDayOnMap(day) {
   markers.forEach(m => m.setMap(null));
   markers = [];
+  if (!day.activities) return;
   const bounds = new google.maps.LatLngBounds();
   const colors = { sightseeing:'#6c5ce7', food:'#f39c12', adventure:'#e74c3c', culture:'#9b59b6', shopping:'#fd79a8', transport:'#636e72', relaxation:'#00cec9' };
 
@@ -225,22 +339,13 @@ function highlightDayOnMap(day) {
     const pos = { lat: act.lat, lng: act.lng };
     bounds.extend(pos);
     const marker = new google.maps.Marker({
-      position: pos,
-      map,
+      position: pos, map,
       title: act.title,
       label: { text: String(i + 1), color: '#fff', fontWeight: '700', fontSize: '12px' },
-      icon: {
-        path: google.maps.SymbolPath.CIRCLE,
-        scale: 14,
-        fillColor: colors[act.category] || '#6c5ce7',
-        fillOpacity: 1,
-        strokeColor: '#fff',
-        strokeWeight: 2
-      }
+      icon: { path: google.maps.SymbolPath.CIRCLE, scale: 14, fillColor: colors[act.category] || '#6c5ce7', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2 }
     });
-
     const infoWindow = new google.maps.InfoWindow({
-      content: `<div style="color:#333;padding:4px;"><strong>${act.title}</strong><br><small>${act.time} · ${act.duration} · $${act.estimatedCost}</small></div>`
+      content: `<div style="color:#333;padding:4px;max-width:200px;"><strong>${act.title}</strong><br><small>${act.time} · ${act.duration} · $${act.estimatedCost}</small></div>`
     });
     marker.addListener('click', () => infoWindow.open(map, marker));
     markers.push(marker);
@@ -253,11 +358,5 @@ function highlightDayOnMap(day) {
 // Back button
 document.getElementById('back-btn').addEventListener('click', () => {
   resetForm();
-  // Reset loading steps
-  ['step-1','step-2','step-3','step-4'].forEach(id => {
-    const el = document.getElementById(id);
-    el.classList.remove('active','done');
-    el.textContent = el.textContent.replace('✅ ','');
-  });
-  document.getElementById('step-1').classList.add('active');
+  itineraryData = null;
 });
