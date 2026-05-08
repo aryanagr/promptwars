@@ -19,9 +19,18 @@ function getGeminiApiKey() {
   ).trim();
 }
 
+function getMapsApiKey() {
+  return (process.env.GOOGLE_MAPS_API_KEY || '').trim();
+}
+
 function hasValidGeminiKey() {
   const key = getGeminiApiKey();
   return Boolean(key && key !== 'your_gemini_api_key_here');
+}
+
+function hasValidMapsKey() {
+  const key = getMapsApiKey();
+  return Boolean(key);
 }
 
 function getModel() {
@@ -37,6 +46,77 @@ function formatApiError(error, fallbackMessage) {
   const providerMessage = error?.message || error?.errorDetails?.[0]?.message;
   if (providerMessage) return `${fallbackMessage} (${providerMessage})`;
   return fallbackMessage;
+}
+
+function parseTimeToMinutes(timeStr) {
+  if (!timeStr || typeof timeStr !== 'string') return null;
+  const m = timeStr.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+  if (!m) return null;
+  let hh = Number(m[1]);
+  const mm = Number(m[2]);
+  const ampm = m[3].toUpperCase();
+  if (ampm === 'AM' && hh === 12) hh = 0;
+  if (ampm === 'PM' && hh !== 12) hh += 12;
+  return hh * 60 + mm;
+}
+
+function durationTextToMinutes(duration) {
+  if (!duration || typeof duration !== 'string') return 0;
+  const h = duration.match(/(\d+)\s*hour/i);
+  const m = duration.match(/(\d+)\s*min/i);
+  return (h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0);
+}
+
+async function placesTextSearch(query) {
+  const key = getMapsApiKey();
+  const url = 'https://places.googleapis.com/v1/places:searchText';
+  const body = {
+    textQuery: query,
+    pageSize: 1
+  };
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': key,
+      'X-Goog-FieldMask': 'places.id,places.displayName,places.formattedAddress,places.location,places.rating,places.userRatingCount,places.googleMapsUri,places.regularOpeningHours.openNow'
+    },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Places search failed (${resp.status}): ${txt}`);
+  }
+  const data = await resp.json();
+  return data.places?.[0] || null;
+}
+
+async function computeRouteMinutes(origin, destination, travelMode = 'DRIVE') {
+  const key = getMapsApiKey();
+  const url = 'https://routes.googleapis.com/directions/v2:computeRoutes';
+  const body = {
+    origin: { location: { latLng: { latitude: origin.lat, longitude: origin.lng } } },
+    destination: { location: { latLng: { latitude: destination.lat, longitude: destination.lng } } },
+    travelMode
+  };
+  const resp = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': key,
+      'X-Goog-FieldMask': 'routes.duration,routes.distanceMeters'
+    },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    const txt = await resp.text();
+    throw new Error(`Routes compute failed (${resp.status}): ${txt}`);
+  }
+  const data = await resp.json();
+  const route = data.routes?.[0];
+  if (!route?.duration) return { travelMinutes: null, distanceMeters: null };
+  const seconds = Number(String(route.duration).replace('s', ''));
+  return { travelMinutes: Math.round(seconds / 60), distanceMeters: route.distanceMeters || null };
 }
 
 const ITINERARY_SCHEMA = {
@@ -301,6 +381,160 @@ app.post('/api/replan-day', async (req, res) => {
   } catch (error) {
     console.error('Error replanning day:', error);
     res.status(500).json({ success: false, error: formatApiError(error, 'Failed to replan day') });
+  }
+});
+
+app.post('/api/validate-places', async (req, res) => {
+  try {
+    if (!hasValidMapsKey()) {
+      return res.status(500).json({ success: false, error: 'GOOGLE_MAPS_API_KEY is not configured.' });
+    }
+    const { itinerary, destination } = req.body;
+    if (!itinerary?.days) return res.status(400).json({ success: false, error: 'Missing itinerary.' });
+
+    let validatedCount = 0;
+    let unresolvedCount = 0;
+    for (const day of itinerary.days) {
+      for (const act of day.activities || []) {
+        const place = await placesTextSearch(`${act.location || act.title} ${destination || ''}`.trim());
+        if (place?.location) {
+          act.placeId = place.id;
+          act.location = place.formattedAddress || act.location;
+          act.lat = place.location.latitude;
+          act.lng = place.location.longitude;
+          act.verified = true;
+          act.openNow = place.regularOpeningHours?.openNow ?? null;
+          act.rating = place.rating ?? null;
+          act.mapsUri = place.googleMapsUri || null;
+          validatedCount += 1;
+        } else {
+          act.verified = false;
+          unresolvedCount += 1;
+        }
+      }
+    }
+    const enriched = enrichWithBookingLinks(itinerary);
+    res.json({ success: true, itinerary: enriched, validatedCount, unresolvedCount });
+  } catch (error) {
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to validate places') });
+  }
+});
+
+app.post('/api/compute-routes', async (req, res) => {
+  try {
+    if (!hasValidMapsKey()) {
+      return res.status(500).json({ success: false, error: 'GOOGLE_MAPS_API_KEY is not configured.' });
+    }
+    const { itinerary, travelMode } = req.body;
+    if (!itinerary?.days) return res.status(400).json({ success: false, error: 'Missing itinerary.' });
+
+    for (const day of itinerary.days) {
+      const acts = day.activities || [];
+      for (let i = 1; i < acts.length; i++) {
+        const prev = acts[i - 1];
+        const cur = acts[i];
+        if (prev?.lat && prev?.lng && cur?.lat && cur?.lng) {
+          const route = await computeRouteMinutes(
+            { lat: prev.lat, lng: prev.lng },
+            { lat: cur.lat, lng: cur.lng },
+            travelMode || 'DRIVE'
+          );
+          cur.travelFromPrevious = route;
+        } else {
+          cur.travelFromPrevious = { travelMinutes: null, distanceMeters: null };
+        }
+      }
+    }
+    res.json({ success: true, itinerary });
+  } catch (error) {
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to compute routes') });
+  }
+});
+
+app.post('/api/apply-constraints', async (req, res) => {
+  try {
+    const { itinerary, constraints = {} } = req.body;
+    if (!itinerary?.days) return res.status(400).json({ success: false, error: 'Missing itinerary.' });
+
+    const maxTravelMinutesPerHop = Number(constraints.maxTravelMinutesPerHop || 90);
+    const budgetCap = constraints.budgetCap !== undefined ? Number(constraints.budgetCap) : null;
+    const blockedCategories = new Set((constraints.blockedCategories || []).map(s => String(s).toLowerCase()));
+    const findings = [];
+
+    let runningCost = 0;
+    itinerary.days.forEach((day, di) => {
+      const acts = day.activities || [];
+      acts.forEach((act, ai) => {
+        const cost = Number(act.estimatedCost || 0);
+        runningCost += cost;
+
+        if (blockedCategories.has(String(act.category || '').toLowerCase())) {
+          findings.push({ type: 'blocked_category', dayIndex: di, activityIndex: ai, message: `${act.title} violates blocked category constraint.` });
+        }
+        const travel = act.travelFromPrevious?.travelMinutes;
+        if (travel !== undefined && travel !== null && travel > maxTravelMinutesPerHop) {
+          findings.push({ type: 'travel_too_long', dayIndex: di, activityIndex: ai, message: `${act.title} has long transfer (${travel} min).` });
+        }
+        if (ai > 0) {
+          const prev = acts[ai - 1];
+          const prevStart = parseTimeToMinutes(prev.time);
+          const curStart = parseTimeToMinutes(act.time);
+          if (prevStart !== null && curStart !== null) {
+            const prevEnd = prevStart + durationTextToMinutes(prev.duration) + Number(act.travelFromPrevious?.travelMinutes || 0);
+            if (curStart < prevEnd) {
+              findings.push({ type: 'time_overlap', dayIndex: di, activityIndex: ai, message: `${act.title} overlaps previous activity timing.` });
+            }
+          }
+        }
+      });
+    });
+
+    if (budgetCap !== null && runningCost > budgetCap) {
+      findings.push({ type: 'over_budget', message: `Estimated cost ${runningCost} exceeds budget cap ${budgetCap}.` });
+    }
+
+    res.json({
+      success: true,
+      feasible: findings.length === 0,
+      findings,
+      summary: { runningCost, budgetCap, maxTravelMinutesPerHop }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to apply constraints') });
+  }
+});
+
+app.post('/api/replan-segment', async (req, res) => {
+  try {
+    if (!hasValidGeminiKey()) {
+      return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.' });
+    }
+    const { itinerary, dayIndex, startActivityIndex, endActivityIndex, reason, constraints = {} } = req.body;
+    if (!itinerary?.days || dayIndex === undefined || startActivityIndex === undefined || endActivityIndex === undefined) {
+      return res.status(400).json({ success: false, error: 'Missing required fields for segment replan.' });
+    }
+    const day = itinerary.days[dayIndex];
+    const before = day.activities.slice(0, startActivityIndex).map(a => a.title).join(', ');
+    const after = day.activities.slice(endActivityIndex + 1).map(a => a.title).join(', ');
+    const originalSeg = day.activities.slice(startActivityIndex, endActivityIndex + 1);
+    const segmentSize = originalSeg.length;
+    const slotBudget = originalSeg.reduce((s, a) => s + Number(a.estimatedCost || 0), 0);
+
+    const prompt = `Replan a segment of a day itinerary.\n\nDay context: ${day.theme || `Day ${day.day}`} (${day.date || ''})\nReason: ${reason || 'Improve fit'}\nKeep activities before segment unchanged: ${before || 'none'}\nKeep activities after segment unchanged: ${after || 'none'}\nSegment length must be exactly ${segmentSize} activities.\nSegment budget should stay near $${slotBudget}.\nMax travel minutes per hop: ${constraints.maxTravelMinutesPerHop || 90}.\n\nReturn ONLY JSON:\n{\n  "activities": [\n    {\n      "time": "09:00 AM",\n      "title": "Activity name",\n      "description": "Brief description",\n      "location": "Full place name and area",\n      "lat": 0.0,\n      "lng": 0.0,\n      "duration": "2 hours",\n      "estimatedCost": 0,\n      "category": "sightseeing|food|adventure|culture|shopping|transport|relaxation"\n    }\n  ]\n}`;
+
+    const model = getModel();
+    const result = await model.generateContent(prompt);
+    const parsed = cleanAndParseJSON(result.response.text());
+    const newSeg = parsed.activities;
+    if (!Array.isArray(newSeg) || newSeg.length !== segmentSize) {
+      return res.status(500).json({ success: false, error: 'Segment replan output size mismatch.' });
+    }
+
+    day.activities.splice(startActivityIndex, segmentSize, ...newSeg);
+    enrichWithBookingLinks(itinerary);
+    res.json({ success: true, itinerary, dayIndex, startActivityIndex, endActivityIndex });
+  } catch (error) {
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to replan segment') });
   }
 });
 
