@@ -147,6 +147,20 @@ test('POST /api/apply-constraints reports findings for an over-budget plan', asy
   assert.ok(data.findings.some((f) => f.type === 'over_budget'));
 });
 
+test('POST /api/translate-itinerary rejects missing fields with 400', async () => {
+  const { status, data } = await postJson('/api/translate-itinerary', {});
+  assert.equal(status, 400);
+  assert.equal(data.success, false);
+});
+
+test('POST /api/translate-itinerary rejects missing targetLanguage with 400', async () => {
+  const { status, data } = await postJson('/api/translate-itinerary', {
+    itinerary: { days: [{ activities: [] }] }
+  });
+  assert.equal(status, 400);
+  assert.match(data.error, /targetLanguage/i);
+});
+
 test('POST /api/email-itinerary rejects when mailer not configured', async () => {
   const { status, data } = await postJson('/api/email-itinerary', {
     toEmail: 'test@example.com',

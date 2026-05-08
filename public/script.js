@@ -1353,6 +1353,31 @@ async function deleteSavedTrip(id, listItem) {
   }
 }
 
+async function translateCurrentItinerary() {
+  if (!itineraryData) { showError('Generate an itinerary first.'); return; }
+  const target = await askReason('Translate to which language?', {
+    placeholder: 'e.g. es, fr, ja, hi',
+    inputType: 'text',
+    validate: (v) => (!v ? 'Language code is required.' : (!/^[a-zA-Z-]{2,10}$/.test(v) ? 'Use a BCP-47 code like "es" or "zh-CN".' : null))
+  });
+  if (target === null || !target) return;
+  showToast('Translating itinerary…', 'success');
+  try {
+    const res = await fetch('/api/translate-itinerary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ itinerary: itineraryData, targetLanguage: target })
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.success) { showError(data?.error || `Translate failed (${res.status}).`); return; }
+    itineraryData = data.itinerary;
+    renderResults(itineraryData);
+    showToast(`Translated to ${target}.`, 'success');
+  } catch {
+    showError('Network error while translating.');
+  }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
   bootstrapGoogleSignIn();
   const savedBtn = document.getElementById('saved-trips-btn');
@@ -1363,4 +1388,6 @@ document.addEventListener('DOMContentLoaded', () => {
   if (savedModal) savedModal.addEventListener('click', (e) => { if (e.target === savedModal) closeSavedTrips(); });
   const saveBtn = document.getElementById('save-btn');
   if (saveBtn) saveBtn.addEventListener('click', saveCurrentItinerary);
+  const translateBtn = document.getElementById('translate-btn');
+  if (translateBtn) translateBtn.addEventListener('click', translateCurrentItinerary);
 });
