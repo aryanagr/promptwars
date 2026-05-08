@@ -288,12 +288,12 @@ function renderResults(data) {
     });
   }
 
-  showDay(0, data);
   if (mapsReady) {
     initMap(data);
   } else {
     showMapUnavailable('Map unavailable. Configure a valid Google Maps API key and allowed referrers.');
   }
+  showDay(0, data);
 }
 
 function showDay(index, data) {
@@ -535,9 +535,14 @@ function initMap(data) {
 }
 
 function highlightDayOnMap(day) {
+  if (!map || typeof map.fitBounds !== 'function') {
+    return;
+  }
+  if (!day || !Array.isArray(day.activities)) {
+    return;
+  }
   markers.forEach(m => m.setMap(null));
   markers = [];
-  if (!day.activities) return;
   const bounds = new google.maps.LatLngBounds();
   const colors = { sightseeing:'#6c5ce7', food:'#f39c12', adventure:'#e74c3c', culture:'#9b59b6', shopping:'#fd79a8', transport:'#636e72', relaxation:'#00cec9' };
 
