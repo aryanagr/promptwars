@@ -265,14 +265,35 @@ TRIP DETAILS:
 // Replan a specific activity slot
 app.post('/api/replan-activity', async (req, res) => {
   try {
-    if (!hasValidGeminiKey()) {
-      return res.status(500).json({
-        success: false,
-        error: 'GEMINI_API_KEY is not configured. Update .env with a real Gemini API key.'
-      });
+    const { itinerary, dayIndex, activityIndex, reason } = req.body;
+    if (!itinerary || dayIndex === undefined || activityIndex === undefined) {
+      return res.status(400).json({ success: false, error: 'Missing required fields for replan.' });
     }
 
-    const { itinerary, dayIndex, activityIndex, reason } = req.body;
+    if (!hasValidGeminiKey()) {
+      const day = itinerary.days?.[dayIndex];
+      const activity = day?.activities?.[activityIndex];
+      if (!day || !activity) {
+        return res.status(400).json({ success: false, error: 'Invalid day/activity index.' });
+      }
+
+      const fallbackActivity = {
+        ...activity,
+        title: `Alternative: ${activity.title}`,
+        description: `Demo replacement generated without Gemini API key${reason ? ` (${reason})` : ''}.`,
+        estimatedCost: activity.estimatedCost || 0
+      };
+      fallbackActivity.bookingLinks = {
+        googleMaps: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(fallbackActivity.location)}`,
+        googleSearch: `https://www.google.com/search?q=${encodeURIComponent(`${fallbackActivity.title} ${fallbackActivity.location}`)}+booking`,
+        mapsDirection: fallbackActivity.lat && fallbackActivity.lng
+          ? `https://www.google.com/maps/dir/?api=1&destination=${fallbackActivity.lat},${fallbackActivity.lng}`
+          : null
+      };
+
+      return res.json({ success: true, activity: fallbackActivity, demoMode: true });
+    }
+
     const day = itinerary.days[dayIndex];
     const activity = day.activities[activityIndex];
 
