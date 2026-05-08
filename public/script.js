@@ -1,9 +1,15 @@
-let map, markers = [], itineraryData = null, currentDayIndex = 0, mapsReady = false;
+let gMap, markers = [], itineraryData = null, currentDayIndex = 0, mapsReady = false;
 let directionsService = null;
 let directionsRenderer = null;
 const ACTIVITIES_PER_PAGE = 5;
 const dayActivityPage = {};
 let replanInFlight = false;
+const userPreferences = {
+  fromPlace: '',
+  toPlace: '',
+  transportMode: 'driving',
+  transportBookingRequired: false
+};
 
 // Set default dates
 document.addEventListener('DOMContentLoaded', () => {
@@ -33,13 +39,22 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
   const interests = [...document.querySelectorAll('.interest-chip input:checked')]
     .map(cb => cb.value).join(', ') || 'General sightseeing';
 
+  userPreferences.fromPlace = document.getElementById('from-place').value.trim();
+  userPreferences.toPlace = document.getElementById('to-place').value.trim();
+  userPreferences.transportMode = document.getElementById('transport-mode').value;
+  userPreferences.transportBookingRequired = !!document.getElementById('book-transport-required').checked;
+
   const payload = {
+    fromPlace: userPreferences.fromPlace,
+    toPlace: userPreferences.toPlace,
     destination: document.getElementById('destination').value,
     startDate: document.getElementById('start-date').value,
     endDate: document.getElementById('end-date').value,
     budget: document.getElementById('budget').value,
     travelers: document.getElementById('travelers').value,
-    interests
+    interests,
+    transportMode: userPreferences.transportMode,
+    transportBookingRequired: userPreferences.transportBookingRequired
   };
 
   // Timeout controller - 60 second max
@@ -261,10 +276,11 @@ function renderResults(data) {
   document.getElementById('trip-summary').textContent = data.summary || '';
 
   let totalPlaces = 0;
-  data.days.forEach(d => totalPlaces += (d.activities || []).length);
+  data.days.forEach(d => totalPlaces += (d.activities || []).filter(a => !a.discarded).length);
   document.getElementById('stat-days').textContent = data.days.length;
   document.getElementById('stat-places').textContent = totalPlaces;
   document.getElementById('stat-cost').textContent = '$' + (data.totalEstimatedCost || 0);
+  updateSummaryStats();
 
   // Day tabs
   const tabsEl = document.getElementById('day-tabs');
@@ -321,7 +337,9 @@ function showDay(index, data) {
       </div>
     </div>`;
 
-  const activities = day.activities || [];
+  const activities = (day.activities || [])
+    .map((act, originalIndex) => ({ act, originalIndex }))
+    .filter(item => !item.act.discarded);
   const totalPages = Math.max(1, Math.ceil(activities.length / ACTIVITIES_PER_PAGE));
   if (dayActivityPage[index] > totalPages) dayActivityPage[index] = totalPages;
   const page = dayActivityPage[index];
@@ -329,8 +347,9 @@ function showDay(index, data) {
   const end = start + ACTIVITIES_PER_PAGE;
   const pageActivities = activities.slice(start, end);
 
-  pageActivities.forEach((act, localAi) => {
-    const ai = start + localAi;
+  pageActivities.forEach((item) => {
+    const act = item.act;
+    const ai = item.originalIndex;
     const cat = (act.category || '').toLowerCase();
     const card = document.createElement('div');
     card.className = `activity-card glass-card cat-${cat}`;
@@ -342,7 +361,11 @@ function showDay(index, data) {
         <a href="${act.bookingLinks.googleSearch}" target="_blank" class="action-link">🔍 Book</a>
         ${act.bookingLinks.mapsDirection ? `<a href="${act.bookingLinks.mapsDirection}" target="_blank" class="action-link">🧭 Directions</a>` : ''}
         <button class="action-link replan-btn" onclick="replanActivity(${index}, ${ai})">🔄 Swap</button>
-      </div>` : `<div class="activity-actions"><button class="action-link replan-btn" onclick="replanActivity(${index}, ${ai})">🔄 Swap</button></div>`;
+        <button class="action-link reorder-btn" onclick="moveActivity(${index}, ${ai}, -1)">↑ Move Up</button>
+        <button class="action-link reorder-btn" onclick="moveActivity(${index}, ${ai}, 1)">↓ Move Down</button>
+        <button class="action-link discard-btn" onclick="discardActivity(${index}, ${ai})">✖ Discard</button>
+        <label class="keep-toggle"><input type="checkbox" ${act.discarded ? '' : 'checked'} onchange="toggleKeep(${index}, ${ai}, this.checked)">Keep</label>
+      </div>` : `<div class="activity-actions"><button class="action-link replan-btn" onclick="replanActivity(${index}, ${ai})">🔄 Swap</button><button class="action-link reorder-btn" onclick="moveActivity(${index}, ${ai}, -1)">↑ Move Up</button><button class="action-link reorder-btn" onclick="moveActivity(${index}, ${ai}, 1)">↓ Move Down</button><button class="action-link discard-btn" onclick="discardActivity(${index}, ${ai})">✖ Discard</button><label class="keep-toggle"><input type="checkbox" ${act.discarded ? '' : 'checked'} onchange="toggleKeep(${index}, ${ai}, this.checked)">Keep</label></div>`;
 
     card.innerHTML = `
       <div class="activity-time">${act.time || ''}</div>
@@ -358,13 +381,20 @@ function showDay(index, data) {
     card.addEventListener('click', (e) => {
       if (e.target.closest('a') || e.target.closest('button')) return;
       const pos = toLatLng(act);
-      if (map && pos) {
-        map.panTo(pos);
-        map.setZoom(15);
+      if (gMap && pos) {
+        gMap.panTo(pos);
+        gMap.setZoom(15);
       }
     });
     section.appendChild(card);
   });
+
+  if (pageActivities.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'replan-loading';
+    empty.textContent = 'No activities left for this day. Replan day or enable kept items.';
+    section.appendChild(empty);
+  }
 
   if (totalPages > 1) {
     const pagination = document.createElement('div');
@@ -380,7 +410,7 @@ function showDay(index, data) {
   }
 
   content.appendChild(section);
-  if (mapsReady && map) {
+  if (mapsReady && gMap) {
     try {
       highlightDayOnMap(day);
     } catch (e) {
@@ -393,6 +423,51 @@ function showDay(index, data) {
 
 function changeActivityPage(dayIndex, delta) {
   dayActivityPage[dayIndex] = Math.max(1, (dayActivityPage[dayIndex] || 1) + delta);
+  showDay(dayIndex, itineraryData);
+}
+
+function updateSummaryStats() {
+  if (!itineraryData?.days) return;
+  let totalPlaces = 0;
+  let totalCost = 0;
+  itineraryData.days.forEach(day => {
+    (day.activities || []).forEach(act => {
+      if (act.discarded) return;
+      totalPlaces += 1;
+      totalCost += Number(act.estimatedCost || 0);
+    });
+  });
+  document.getElementById('stat-days').textContent = itineraryData.days.length;
+  document.getElementById('stat-places').textContent = totalPlaces;
+  document.getElementById('stat-cost').textContent = '$' + totalCost;
+}
+
+function toggleKeep(dayIndex, activityIndex, isChecked) {
+  const day = itineraryData?.days?.[dayIndex];
+  if (!day?.activities?.[activityIndex]) return;
+  day.activities[activityIndex].discarded = !isChecked;
+  updateSummaryStats();
+  showDay(dayIndex, itineraryData);
+}
+
+function discardActivity(dayIndex, activityIndex) {
+  const day = itineraryData?.days?.[dayIndex];
+  if (!day?.activities?.[activityIndex]) return;
+  day.activities[activityIndex].discarded = true;
+  updateSummaryStats();
+  showToast('Activity discarded.', 'success');
+  showDay(dayIndex, itineraryData);
+}
+
+function moveActivity(dayIndex, activityIndex, delta) {
+  const day = itineraryData?.days?.[dayIndex];
+  if (!day?.activities) return;
+  const target = activityIndex + delta;
+  if (target < 0 || target >= day.activities.length) return;
+  const temp = day.activities[activityIndex];
+  day.activities[activityIndex] = day.activities[target];
+  day.activities[target] = temp;
+  showToast('Activity order updated.', 'success');
   showDay(dayIndex, itineraryData);
 }
 
@@ -435,6 +510,7 @@ async function replanActivity(dayIndex, activityIndex) {
 
     itineraryData = data.itinerary;
     showDay(dayIndex, itineraryData);
+    updateSummaryStats();
     const newCard = document.getElementById(`activity-${dayIndex}-${activityIndex}`);
     if (newCard) {
       newCard.classList.add('just-replaced');
@@ -484,6 +560,7 @@ async function replanDay(dayIndex) {
     }
     itineraryData = data.itinerary;
     showDay(dayIndex, itineraryData);
+    updateSummaryStats();
     showToast('Day replanned successfully.', 'success');
   } catch (err) {
     console.error('Replan day failed:', err);
@@ -506,7 +583,7 @@ function initMap(data) {
     : { lat: 0, lng: 0 };
 
   try {
-    map = new google.maps.Map(document.getElementById('map'), {
+    gMap = new google.maps.Map(document.getElementById('map'), {
       center, zoom: 12,
       styles: [
         { elementType: 'geometry', stylers: [{ color: '#1d1d3b' }] },
@@ -526,7 +603,7 @@ function initMap(data) {
       preserveViewport: false,
       polylineOptions: { strokeColor: '#00cec9', strokeOpacity: 0.9, strokeWeight: 5 }
     });
-    directionsRenderer.setMap(map);
+    directionsRenderer.setMap(gMap);
     highlightDayOnMap(data.days[0]);
   } catch (e) {
     mapsReady = false;
@@ -535,7 +612,7 @@ function initMap(data) {
 }
 
 function highlightDayOnMap(day) {
-  if (!map || typeof map.fitBounds !== 'function') {
+  if (!gMap || typeof gMap.fitBounds !== 'function') {
     return;
   }
   if (!day || !Array.isArray(day.activities)) {
@@ -547,11 +624,12 @@ function highlightDayOnMap(day) {
   const colors = { sightseeing:'#6c5ce7', food:'#f39c12', adventure:'#e74c3c', culture:'#9b59b6', shopping:'#fd79a8', transport:'#636e72', relaxation:'#00cec9' };
 
   day.activities.forEach((act, i) => {
+    if (act.discarded) return;
     const pos = toLatLng(act);
     if (!pos) return;
     bounds.extend(pos);
     const marker = new google.maps.Marker({
-      position: pos, map,
+      position: pos, map: gMap,
       title: act.title,
       label: { text: String(i + 1), color: '#fff', fontWeight: '700', fontSize: '12px' },
       icon: { path: google.maps.SymbolPath.CIRCLE, scale: 14, fillColor: colors[act.category] || '#6c5ce7', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2 }
@@ -559,20 +637,29 @@ function highlightDayOnMap(day) {
     const infoWindow = new google.maps.InfoWindow({
       content: `<div style="color:#333;padding:4px;max-width:200px;"><strong>${act.title}</strong><br><small>${act.time} · ${act.duration} · $${act.estimatedCost}</small></div>`
     });
-    marker.addListener('click', () => infoWindow.open(map, marker));
+    marker.addListener('click', () => infoWindow.open(gMap, marker));
     markers.push(marker);
   });
 
-  if (markers.length > 1) map.fitBounds(bounds, 50);
-  else if (markers.length === 1) { map.setCenter(markers[0].getPosition()); map.setZoom(14); }
+  if (markers.length > 1) gMap.fitBounds(bounds, 50);
+  else if (markers.length === 1) { gMap.setCenter(markers[0].getPosition()); gMap.setZoom(14); }
 }
 
 function clearRoute() {
   if (directionsRenderer) directionsRenderer.set('directions', null);
 }
 
+function getTravelModeForMaps() {
+  if (!window.google?.maps?.TravelMode) return null;
+  const mode = String(userPreferences.transportMode || 'driving').toLowerCase();
+  if (mode === 'walking') return google.maps.TravelMode.WALKING;
+  if (mode === 'bicycling') return google.maps.TravelMode.BICYCLING;
+  if (mode === 'transit') return google.maps.TravelMode.TRANSIT;
+  return google.maps.TravelMode.DRIVING;
+}
+
 function startRoute(dayIndex) {
-  if (!mapsReady || !map || !directionsService || !directionsRenderer) {
+  if (!mapsReady || !gMap || !directionsService || !directionsRenderer) {
     showToast('Map is not ready yet.');
     return;
   }
@@ -580,6 +667,7 @@ function startRoute(dayIndex) {
   if (!day) return;
 
   const points = (day.activities || [])
+    .filter(act => !act.discarded)
     .map(toLatLng)
     .filter(Boolean);
 
@@ -594,7 +682,7 @@ function startRoute(dayIndex) {
     destination: points[points.length - 1],
     waypoints,
     optimizeWaypoints: false,
-    travelMode: google.maps.TravelMode.DRIVING
+    travelMode: getTravelModeForMaps() || google.maps.TravelMode.DRIVING
   }, (result, status) => {
     if (status === 'OK' && result) {
       directionsRenderer.setDirections(result);

@@ -55,7 +55,11 @@ body { font-family: var(--font-body); background: var(--bg-primary); color: var(
 .form-group.full-width { grid-column:1/-1; }
 .form-group label { font-size:14px; font-weight:500; color:var(--text-secondary); }
 .form-group input { padding:12px 16px; background:rgba(255,255,255,0.08); border:1px solid var(--glass-border); border-radius:var(--radius-sm); color:var(--text-primary); font-size:15px; font-family:var(--font-body); transition:all 0.3s; }
+.form-group select { padding:12px 16px; background:rgba(255,255,255,0.08); border:1px solid var(--glass-border); border-radius:var(--radius-sm); color:var(--text-primary); font-size:15px; font-family:var(--font-body); transition:all 0.3s; appearance:none; }
 .form-group input:focus { outline:none; border-color:var(--accent-1); box-shadow:0 0 20px rgba(108,92,231,0.2); }
+.form-group select:focus { outline:none; border-color:var(--accent-1); box-shadow:0 0 20px rgba(108,92,231,0.2); }
+.switch-row { display:flex; align-items:center; gap:8px; padding:10px 12px; border:1px solid var(--glass-border); border-radius:var(--radius-sm); background:rgba(255,255,255,0.06); font-size:13px; color:var(--text-secondary); }
+.switch-row input { width:16px; height:16px; }
 .interests-grid { display:flex; flex-wrap:wrap; gap:8px; }
 .interest-chip { cursor:pointer; }
 .interest-chip input { display:none; }
@@ -152,6 +156,11 @@ footer { text-align:center; padding:30px; color:var(--text-secondary); font-size
 .action-link:hover { color:var(--accent-2); border-color:var(--accent-2); background:rgba(0,206,201,0.1); }
 .replan-btn { color:var(--accent-3) !important; }
 .replan-btn:hover { border-color:var(--accent-3) !important; background:rgba(253,121,168,0.1) !important; }
+.discard-btn { color:#ff8f8f !important; border-color:#ff8f8f55 !important; }
+.discard-btn:hover { border-color:#ff8f8f !important; background:rgba(255,143,143,0.15) !important; }
+.reorder-btn { color:#7dd3fc !important; border-color:#7dd3fc55 !important; }
+.reorder-btn:hover { border-color:#7dd3fc !important; background:rgba(125,211,252,0.15) !important; }
+.keep-toggle { display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-secondary); padding:4px 8px; border-radius:6px; border:1px solid var(--glass-border); background:rgba(255,255,255,0.03); }
 
 /* === Replan Loading === */
 .replan-loading { text-align:center; padding:60px 20px; color:var(--text-secondary); font-size:16px; }

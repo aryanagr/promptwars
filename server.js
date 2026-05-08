@@ -352,9 +352,20 @@ app.get('/api/health', (req, res) => {
 
 app.post('/api/generate-itinerary', async (req, res) => {
   try {
-    const { destination, startDate, endDate, budget, travelers, interests } = req.body;
+    const {
+      fromPlace,
+      toPlace,
+      destination,
+      startDate,
+      endDate,
+      budget,
+      travelers,
+      interests,
+      transportMode,
+      transportBookingRequired
+    } = req.body;
 
-    if (!destination || !startDate || !endDate || !budget) {
+    if (!destination || !startDate || !endDate || !budget || !fromPlace || !toPlace) {
       return res.status(400).json({ success: false, error: 'Missing required fields.' });
     }
 
@@ -362,7 +373,7 @@ app.post('/api/generate-itinerary', async (req, res) => {
       return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.' });
     }
 
-    const prompt = `${BASE_PROMPT}\n\nTRIP DETAILS:\n- Destination: ${destination}\n- Start Date: ${startDate}\n- End Date: ${endDate}\n- Budget: $${budget} USD total\n- Number of Travelers: ${travelers || 1}\n- Interests: ${interests || 'General sightseeing, local food, culture'}`;
+    const prompt = `${BASE_PROMPT}\n\nTRIP DETAILS:\n- From: ${fromPlace}\n- To: ${toPlace}\n- Destination Area: ${destination}\n- Start Date: ${startDate}\n- End Date: ${endDate}\n- Budget: $${budget} USD total\n- Number of Travelers: ${travelers || 1}\n- Interests: ${interests || 'General sightseeing, local food, culture'}\n- Preferred Transport Mode: ${transportMode || 'driving'}\n- Need Transport Booking Options: ${transportBookingRequired ? 'yes' : 'no'}\n\nAlso include practical movement between activities considering the preferred transport mode.`;
 
     const itinerary = await generateWithRetry(prompt);
     const enriched = enrichWithBookingLinks(itinerary);

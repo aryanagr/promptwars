@@ -7,7 +7,7 @@
   <title>TravelAI — Smart Travel Planner</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=20260508-2">
+  <link rel="stylesheet" href="style.css?v=20260508-3">
 </head>
 <body>
   <section id="hero">
@@ -21,14 +21,38 @@
       <p class="hero-subtitle">Tell us where you want to go, and our AI creates a personalized itinerary with mapped routes and budget tracking.</p>
       <form id="trip-form" class="glass-card">
         <div class="form-grid">
+          <div class="form-group">
+            <label for="from-place">🛫 From</label>
+            <input type="text" id="from-place" placeholder="e.g. Mumbai, India" required>
+          </div>
+          <div class="form-group">
+            <label for="to-place">🛬 To</label>
+            <input type="text" id="to-place" placeholder="e.g. Tokyo, Japan" required>
+          </div>
           <div class="form-group full-width">
-            <label for="destination">🌍 Where do you want to go?</label>
-            <input type="text" id="destination" placeholder="e.g. Tokyo, Japan" required>
+            <label for="destination">🌍 Destination (Main City)</label>
+            <input type="text" id="destination" placeholder="e.g. Shinjuku, Tokyo" required>
           </div>
           <div class="form-group"><label for="start-date">📅 Start Date</label><input type="date" id="start-date" required></div>
           <div class="form-group"><label for="end-date">📅 End Date</label><input type="date" id="end-date" required></div>
           <div class="form-group"><label for="budget">💰 Budget (USD)</label><input type="number" id="budget" placeholder="2000" min="100" required></div>
           <div class="form-group"><label for="travelers">👥 Travelers</label><input type="number" id="travelers" value="1" min="1" max="20" required></div>
+          <div class="form-group">
+            <label for="transport-mode">🚗 Transport Mode</label>
+            <select id="transport-mode">
+              <option value="driving">Driving</option>
+              <option value="transit">Transit</option>
+              <option value="walking">Walking</option>
+              <option value="bicycling">Bicycling</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>🧾 Booking Support</label>
+            <label class="switch-row">
+              <input type="checkbox" id="book-transport-required">
+              <span>Need transport booking options</span>
+            </label>
+          </div>
           <div class="form-group full-width">
             <label>🎯 Interests</label>
             <div class="interests-grid">
@@ -101,6 +125,6 @@
   </div>
 
   <footer><p>Built with ❤️ using <strong>Gemini AI</strong> & <strong>Google Maps</strong> | PromptWars 2026</p></footer>
-  <script src="script.js?v=20260508-2"></script>
+  <script src="script.js?v=20260508-3"></script>
 </body>
 </html>
