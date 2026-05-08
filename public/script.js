@@ -1,3 +1,8 @@
+// TravelAI frontend: collects form input, calls /api endpoints, renders the
+// itinerary into day tabs / activity cards / Google Map markers.
+
+// === Module-scope state (no bundler — globals on purpose) ===
+
 let gMap, markers = [], itineraryData = null, currentDayIndex = 0, mapsReady = false;
 let directionsService = null;
 let directionsRenderer = null;
@@ -32,6 +37,8 @@ function normalizeCityName(value) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
 }
 
+// === HTML escaping helpers (used wherever AI/user data lands in innerHTML) ===
+
 function escapeHtml(value) {
   return String(value == null ? '' : value)
     .replace(/&/g, '&amp;')
@@ -41,6 +48,7 @@ function escapeHtml(value) {
     .replace(/'/g, '&#39;');
 }
 
+// Allow only http/https/mailto/tel/relative — drop javascript: and data: URLs.
 function safeUrl(value) {
   const raw = String(value == null ? '' : value).trim();
   if (!raw) return '';
@@ -49,6 +57,8 @@ function safeUrl(value) {
   }
   return '';
 }
+
+// === Form helpers (city sync, intermediate stops, validation) ===
 
 function syncDestinationWithTo() {
   const toInput = document.getElementById('to-place');
@@ -147,6 +157,7 @@ function initRoutePlannerInputs() {
   }
 }
 
+// Disable email button when SMTP isn't configured server-side.
 async function refreshServiceAvailability() {
   const emailBtn = document.getElementById('email-btn');
   if (!emailBtn) return;
@@ -163,7 +174,8 @@ async function refreshServiceAvailability() {
   }
 }
 
-// Form submission
+// === Form submission → /api/generate-itinerary → renderResults ===
+
 document.getElementById('trip-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   const interests = [...document.querySelectorAll('.interest-chip input:checked')]
@@ -279,6 +291,8 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
   }
 });
 
+// === Toast / fatal error UI ===
+
 function showToast(msg, type = 'error') {
   const announcer = document.getElementById('sr-announcer');
   if (announcer) announcer.textContent = msg;
@@ -317,6 +331,8 @@ function setReplanBusy(isBusy) {
     else btn.removeAttribute('disabled');
   });
 }
+
+// === Modal prompt — Promise<string|null>; null = cancelled ===
 
 function askReason(titleText, options = {}) {
   const modal = document.getElementById('reason-modal');
@@ -416,7 +432,8 @@ function animateLoadingSteps() {
   window._loadingInterval = interval;
 }
 
-// Load Google Maps
+// === Google Maps SDK loader (idempotent) ===
+
 async function loadMapsAPI() {
   if (window.google && window.google.maps) return;
   window.gm_authFailure = () => {
@@ -472,7 +489,8 @@ function toLatLng(activity) {
   return { lat, lng };
 }
 
-// Render results
+// === Render: results header → day tabs → tips → first-day map ===
+
 function renderResults(data) {
   if (window._loadingInterval) clearInterval(window._loadingInterval);
   document.getElementById('loading-section').style.display = 'none';
@@ -519,6 +537,7 @@ function renderResults(data) {
   showDay(0, data);
 }
 
+// Re-renders one day's activity list (paginated) and re-pins the map.
 function showDay(index, data) {
   currentDayIndex = index;
   document.querySelectorAll('.day-tab').forEach((t, i) => {
@@ -677,6 +696,8 @@ function updateSummaryStats() {
   document.getElementById('stat-cost').textContent = '$' + totalCost;
 }
 
+// === Activity-list mutators (local state; no server call) ===
+
 function toggleKeep(dayIndex, activityIndex, isChecked) {
   const day = itineraryData?.days?.[dayIndex];
   if (!day?.activities?.[activityIndex]) return;
@@ -706,7 +727,8 @@ function moveActivity(dayIndex, activityIndex, delta) {
   showDay(dayIndex, itineraryData);
 }
 
-// Replan activity
+// === Replan handlers (call /api/replan-* and re-render) ===
+
 async function replanActivity(dayIndex, activityIndex) {
   if (replanInFlight) {
     showToast('Replan already in progress. Please wait.');
@@ -805,6 +827,8 @@ async function replanDay(dayIndex) {
     setReplanBusy(false);
   }
 }
+
+// === Map init + per-day marker render + multi-stop route drawing ===
 
 function initMap(data) {
   const allCoords = [];
@@ -946,6 +970,7 @@ function buildRouteRequest(points, travelMode, includeWaypoints) {
   return request;
 }
 
+// Tries preferred travel mode; falls back to driving when transit lacks waypoints.
 async function startRoute(dayIndex) {
   if (!mapsReady || !gMap || !directionsService || !directionsRenderer) {
     showToast('Map is not ready yet.');
@@ -1023,7 +1048,8 @@ async function startRoute(dayIndex) {
   routeInFlight = false;
 }
 
-// Back button
+// === Header buttons (back, email) ===
+
 document.getElementById('back-btn').addEventListener('click', () => {
   resetForm();
   itineraryData = null;

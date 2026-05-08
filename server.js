@@ -1,3 +1,6 @@
+// TravelAI server: Express app fronting Gemini + Google Maps + SMTP.
+// Routes live at the bottom; helpers and middleware build up to them.
+
 const fs = require('fs');
 const crypto = require('crypto');
 const dotenv = require('dotenv');
@@ -24,6 +27,8 @@ app.disable('x-powered-by');
 const trustProxyHops = Number(process.env.TRUST_PROXY_HOPS || 1);
 app.set('trust proxy', Number.isFinite(trustProxyHops) && trustProxyHops >= 0 ? trustProxyHops : 1);
 
+// === Env / config ===
+
 function readFromFileEnv(name) {
   const filePath = process.env[`${name}_FILE`];
   if (!filePath) return '';
@@ -34,6 +39,7 @@ function readFromFileEnv(name) {
   }
 }
 
+// First non-empty value across alias names; also resolves `<NAME>_FILE` for Cloud Run secrets.
 function envValue(...names) {
   for (const name of names) {
     const direct = (process.env[name] || '').trim();
@@ -112,6 +118,7 @@ function hasValidMailerConfig() {
   );
 }
 
+// Detect obvious placeholder strings in secret slots so misconfig fails loud, not silent.
 function isPlaceholderSecret(value) {
   const v = String(value || '').toLowerCase();
   if (!v) return true;
@@ -135,6 +142,8 @@ function missingMailerFields() {
   return missing;
 }
 
+// === Input sanitization / output escaping ===
+
 function sanitizeText(value, maxLen = 160) {
   return String(value || '')
     .replace(/[\u0000-\u001F\u007F]/g, ' ')
@@ -155,6 +164,8 @@ function escapeHtml(value) {
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 }
+
+// === Security middleware: CSP, headers, CORS allowlist, origin guard ===
 
 function getAllowedOrigins() {
   const raw = envValue('CORS_ORIGINS', 'CORS_ORIGIN');
@@ -190,6 +201,8 @@ function securityHeadersMiddleware(req, res, next) {
   next();
 }
 
+// === Rate limiting (per IP+path, in-memory, single-instance) ===
+
 function createRateLimiter({ windowMs, maxRequests }) {
   const buckets = new Map();
   return (req, res, next) => {
@@ -220,6 +233,8 @@ const writeApiLimiter = createRateLimiter({
   maxRequests: Number(envValue('API_RATE_LIMIT_MAX') || 30)
 });
 
+// === Itinerary cache (LRU on insertion order, TTL eviction on read) ===
+
 const itineraryCache = new Map();
 const itineraryCacheTtlMs = Number(envValue('ITINERARY_CACHE_TTL_MS') || 180000);
 const itineraryCacheMaxEntries = Number(envValue('ITINERARY_CACHE_MAX_ENTRIES') || 500);
@@ -231,6 +246,7 @@ const GEMINI_TIMEOUT_MS = {
   replanSegment: Number(envValue('GEMINI_REPLAN_SEGMENT_TIMEOUT_MS') || 45000)
 };
 
+// Sort-stable JSON.stringify so equivalent payloads hash to the same cache key.
 function stableStringify(value) {
   if (Array.isArray(value)) {
     return `[${value.map(stableStringify).join(',')}]`;
@@ -284,6 +300,8 @@ function setCachedItinerary(cacheKey, itinerary) {
   }
 }
 
+// === App middleware wiring (CORS → JSON → security headers → static) ===
+
 const allowedOrigins = getAllowedOrigins();
 // Default: deny cross-origin browser requests (same-origin still works because
 // browsers don't enforce CORS on same-origin). Set CORS_ORIGINS env to allow
@@ -306,6 +324,7 @@ const originGuardEnabled = !['off', 'false', '0'].includes(
   String(envValue('ORIGIN_GUARD') || '').toLowerCase()
 );
 
+// Reject POST requests whose Origin/Referer doesn't match allowedOrigins or req host.
 function originGuard(req, res, next) {
   if (!originGuardEnabled) return next();
   const host = req.get('host');
@@ -338,6 +357,8 @@ app.use((req, res, next) => {
 });
 app.use(express.static('public'));
 
+// === Gemini client + JSON repair + retry/timeout ===
+
 function getModel() {
   const key = getGeminiApiKey();
   if (!hasValidGeminiKey()) {
@@ -367,6 +388,7 @@ function formatApiError(error, fallbackMessage) {
   return fallbackMessage;
 }
 
+// Reject `promise` with `message` if it doesn't settle within `ms`.
 function withTimeout(promise, ms, message) {
   let timeoutId;
   const timeoutPromise = new Promise((_, reject) => {
@@ -374,6 +396,8 @@ function withTimeout(promise, ms, message) {
   });
   return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timeoutId));
 }
+
+// === Email rendering (HTML body for SMTP send) ===
 
 function itineraryToEmailHtml(itinerary) {
   const daysHtml = (itinerary.days || []).map(day => {
@@ -400,6 +424,8 @@ function itineraryToEmailHtml(itinerary) {
   `;
 }
 
+// === Time / duration parsing for constraint checks ===
+
 function parseTimeToMinutes(timeStr) {
   if (!timeStr || typeof timeStr !== 'string') return null;
   const m = timeStr.trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
@@ -418,6 +444,8 @@ function durationTextToMinutes(duration) {
   const m = duration.match(/(\d+)\s*min/i);
   return (h ? Number(h[1]) * 60 : 0) + (m ? Number(m[1]) : 0);
 }
+
+// === Google Maps APIs (Places, Routes) — server-side, IP-restricted key ===
 
 async function placesTextSearch(query) {
   const key = getMapsApiKeyServer();
@@ -471,6 +499,8 @@ async function computeRouteMinutes(origin, destination, travelMode = 'DRIVE') {
   return { travelMinutes: Math.round(seconds / 60), distanceMeters: route.distanceMeters || null };
 }
 
+// === Itinerary shape validation (warnings only, not enforced) ===
+
 const ITINERARY_SCHEMA = {
   required: ['tripTitle', 'summary', 'totalEstimatedCost', 'days'],
   dayRequired: ['day', 'date', 'city', 'activities'],
@@ -511,6 +541,7 @@ function validateItinerary(data) {
   return errors;
 }
 
+// Append closing quotes/brackets to balance an LLM-truncated JSON string.
 function tryCloseTruncatedJson(text) {
   let inString = false;
   let escaped = false;
@@ -534,6 +565,7 @@ function tryCloseTruncatedJson(text) {
   return repaired;
 }
 
+// 3-stage parse: vanilla → truncation repair → jsonrepair fallback.
 function cleanAndParseJSON(text) {
   let cleaned = (text || '').replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
   if (!cleaned) throw new Error('Empty AI response');
@@ -555,6 +587,7 @@ function cleanAndParseJSON(text) {
   }
 }
 
+// Mutates each activity to add Google Maps / search / directions URLs.
 function enrichWithBookingLinks(itinerary) {
   if (!itinerary.days) return itinerary;
   itinerary.days.forEach(day => {
@@ -570,6 +603,8 @@ function enrichWithBookingLinks(itinerary) {
   });
   return itinerary;
 }
+
+// === Prompts ===
 
 const BASE_PROMPT = `Create a concise travel itinerary in raw JSON only (no markdown).
 Rules:
@@ -609,6 +644,7 @@ Format:
   ]
 }`;
 
+// One-shot Gemini call with timeout + parse + best-effort retry on failure.
 async function generateWithRetry(prompt, maxRetries = 1) {
   const model = getModel();
   let lastError = null;
@@ -635,6 +671,8 @@ async function generateWithRetry(prompt, maxRetries = 1) {
   }
   throw lastError;
 }
+
+// === Routes ===
 
 app.get('/api/maps-key', (req, res) => {
   res.json({ key: getMapsApiKeyClient() });
