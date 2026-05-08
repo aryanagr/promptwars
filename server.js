@@ -207,6 +207,13 @@ const writeApiLimiter = createRateLimiter({
 const itineraryCache = new Map();
 const itineraryCacheTtlMs = Number(envValue('ITINERARY_CACHE_TTL_MS') || 180000);
 
+const GEMINI_TIMEOUT_MS = {
+  generate: Number(envValue('GEMINI_GENERATE_TIMEOUT_MS') || 50000),
+  replanActivity: Number(envValue('GEMINI_REPLAN_ACTIVITY_TIMEOUT_MS') || 30000),
+  replanDay: Number(envValue('GEMINI_REPLAN_DAY_TIMEOUT_MS') || 45000),
+  replanSegment: Number(envValue('GEMINI_REPLAN_SEGMENT_TIMEOUT_MS') || 45000)
+};
+
 function stableStringify(value) {
   if (Array.isArray(value)) {
     return `[${value.map(stableStringify).join(',')}]`;
@@ -541,7 +548,7 @@ async function generateWithRetry(prompt, maxRetries = 1) {
     try {
       const result = await withTimeout(
         model.generateContent(prompt),
-        22000,
+        GEMINI_TIMEOUT_MS.generate,
         'AI is taking too long to respond. Please try again.'
       );
       const response = await result.response;
@@ -724,7 +731,7 @@ Return ONLY a single JSON object for the replacement activity (no markdown, no c
 
     const result = await withTimeout(
       model.generateContent(prompt),
-      20000,
+      GEMINI_TIMEOUT_MS.replanActivity,
       'AI is taking too long to respond. Please try again.'
     );
     const text = result.response.text();
@@ -774,7 +781,7 @@ app.post('/api/replan-day', writeApiLimiter, async (req, res) => {
     const model = getModel();
     const result = await withTimeout(
       model.generateContent(prompt),
-      25000,
+      GEMINI_TIMEOUT_MS.replanDay,
       'AI is taking too long to respond. Please try again.'
     );
     const text = result.response.text();
@@ -950,7 +957,7 @@ app.post('/api/replan-segment', writeApiLimiter, async (req, res) => {
     const model = getModel();
     const result = await withTimeout(
       model.generateContent(prompt),
-      25000,
+      GEMINI_TIMEOUT_MS.replanSegment,
       'AI is taking too long to respond. Please try again.'
     );
     const parsed = cleanAndParseJSON(result.response.text());
