@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="AI-powered Travel Planning & Experience Engine">
+  <title>TravelAI — Smart Travel Planner</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <section id="hero">
+    <div class="hero-bg-orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div></div>
+    <nav id="navbar">
+      <div class="logo"><span class="logo-icon">✈️</span><span class="logo-text">Travel<span class="logo-accent">AI</span></span></div>
+      <div class="nav-tagline">Powered by Gemini & Google Maps</div>
+    </nav>
+    <div class="hero-content">
+      <h1 class="hero-title">Plan Your Dream Trip<br><span class="gradient-text">With AI Intelligence</span></h1>
+      <p class="hero-subtitle">Tell us where you want to go, and our AI creates a personalized itinerary with mapped routes and budget tracking.</p>
+      <form id="trip-form" class="glass-card">
+        <div class="form-grid">
+          <div class="form-group full-width">
+            <label for="destination">🌍 Where do you want to go?</label>
+            <input type="text" id="destination" placeholder="e.g. Tokyo, Japan" required>
+          </div>
+          <div class="form-group"><label for="start-date">📅 Start Date</label><input type="date" id="start-date" required></div>
+          <div class="form-group"><label for="end-date">📅 End Date</label><input type="date" id="end-date" required></div>
+          <div class="form-group"><label for="budget">💰 Budget (USD)</label><input type="number" id="budget" placeholder="2000" min="100" required></div>
+          <div class="form-group"><label for="travelers">👥 Travelers</label><input type="number" id="travelers" value="1" min="1" max="20" required></div>
+          <div class="form-group full-width">
+            <label>🎯 Interests</label>
+            <div class="interests-grid">
+              <label class="interest-chip"><input type="checkbox" value="Culture & History"><span>🏛️ Culture</span></label>
+              <label class="interest-chip"><input type="checkbox" value="Food & Dining"><span>🍜 Food</span></label>
+              <label class="interest-chip"><input type="checkbox" value="Adventure & Outdoors"><span>🏔️ Adventure</span></label>
+              <label class="interest-chip"><input type="checkbox" value="Shopping"><span>🛍️ Shopping</span></label>
+              <label class="interest-chip"><input type="checkbox" value="Nightlife"><span>🌃 Nightlife</span></label>
+              <label class="interest-chip"><input type="checkbox" value="Relaxation"><span>🧘 Relax</span></label>
+              <label class="interest-chip"><input type="checkbox" value="Photography"><span>📸 Photo</span></label>
+              <label class="interest-chip"><input type="checkbox" value="Nature & Wildlife"><span>🌿 Nature</span></label>
+            </div>
+          </div>
+        </div>
+        <button type="submit" id="generate-btn" class="btn-primary">
+          <span class="btn-text">✨ Generate My Itinerary</span>
+          <span class="btn-loader" style="display:none;"><span class="spinner"></span> AI is planning...</span>
+        </button>
+      </form>
+    </div>
+  </section>
+
+  <section id="loading-section" style="display:none;">
+    <div class="loading-content">
+      <div class="loading-animation"><div class="plane-path">✈️</div></div>
+      <h2>Creating Your Perfect Itinerary</h2>
+      <p class="loading-sub">Our AI is researching the best experiences...</p>
+      <div class="loading-steps">
+        <div class="step active" id="step-1">🔍 Researching destination</div>
+        <div class="step" id="step-2">📍 Finding best locations</div>
+        <div class="step" id="step-3">📋 Building day-by-day plan</div>
+        <div class="step" id="step-4">💰 Optimizing for budget</div>
+      </div>
+    </div>
+  </section>
+
+  <section id="results-section" style="display:none;">
+    <div class="results-header">
+      <button id="back-btn" class="btn-secondary">← Plan Another Trip</button>
+      <h2 id="trip-title" class="gradient-text"></h2>
+      <p id="trip-summary"></p>
+      <div class="trip-stats">
+        <div class="stat glass-card"><span class="stat-icon">📅</span><span class="stat-value" id="stat-days">0</span><span class="stat-label">Days</span></div>
+        <div class="stat glass-card"><span class="stat-icon">📍</span><span class="stat-value" id="stat-places">0</span><span class="stat-label">Places</span></div>
+        <div class="stat glass-card"><span class="stat-icon">💰</span><span class="stat-value" id="stat-cost">$0</span><span class="stat-label">Est. Cost</span></div>
+      </div>
+    </div>
+    <div class="results-layout">
+      <div class="map-container glass-card"><div id="map"></div></div>
+      <div class="itinerary-container">
+        <div class="day-tabs" id="day-tabs"></div>
+        <div id="itinerary-content"></div>
+        <div class="tips-section glass-card" id="tips-section"><h3>💡 Travel Tips</h3><ul id="tips-list"></ul></div>
+      </div>
+    </div>
+  </section>
+
+  <footer><p>Built with ❤️ using <strong>Gemini AI</strong> & <strong>Google Maps</strong> | PromptWars 2026</p></footer>
+  <script src="script.js"></script>
+</body>
+</html>
