@@ -390,3 +390,28 @@ document.getElementById('back-btn').addEventListener('click', () => {
   resetForm();
   itineraryData = null;
 });
+
+document.getElementById('email-btn').addEventListener('click', async () => {
+  if (!itineraryData) {
+    showError('Generate an itinerary first.');
+    return;
+  }
+  const toEmail = (prompt('Enter recipient email address') || '').trim();
+  if (!toEmail) return;
+
+  try {
+    const res = await fetch('/api/email-itinerary', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ toEmail, itinerary: itineraryData })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.success) {
+      showError(data.error || `Failed to send email (${res.status}).`);
+      return;
+    }
+    alert(data.message || 'Itinerary emailed successfully.');
+  } catch (err) {
+    showError('Network error while sending email.');
+  }
+});

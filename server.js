@@ -2,6 +2,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
+const nodemailer = require('nodemailer');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -23,6 +24,17 @@ function getMapsApiKey() {
   return (process.env.GOOGLE_MAPS_API_KEY || '').trim();
 }
 
+function getMailerConfig() {
+  return {
+    host: (process.env.SMTP_HOST || '').trim(),
+    port: Number(process.env.SMTP_PORT || 587),
+    secure: String(process.env.SMTP_SECURE || 'false').toLowerCase() === 'true',
+    user: (process.env.SMTP_USER || '').trim(),
+    pass: (process.env.SMTP_PASS || '').trim(),
+    from: (process.env.MAIL_FROM || process.env.SMTP_USER || '').trim()
+  };
+}
+
 function hasValidGeminiKey() {
   const key = getGeminiApiKey();
   return Boolean(key && key !== 'your_gemini_api_key_here');
@@ -31,6 +43,11 @@ function hasValidGeminiKey() {
 function hasValidMapsKey() {
   const key = getMapsApiKey();
   return Boolean(key);
+}
+
+function hasValidMailerConfig() {
+  const cfg = getMailerConfig();
+  return Boolean(cfg.host && cfg.port && cfg.user && cfg.pass && cfg.from);
 }
 
 function getModel() {
@@ -46,6 +63,27 @@ function formatApiError(error, fallbackMessage) {
   const providerMessage = error?.message || error?.errorDetails?.[0]?.message;
   if (providerMessage) return `${fallbackMessage} (${providerMessage})`;
   return fallbackMessage;
+}
+
+function itineraryToEmailHtml(itinerary) {
+  const daysHtml = (itinerary.days || []).map(day => {
+    const acts = (day.activities || []).map(act => (
+      `<li><strong>${act.time || ''}</strong> - ${act.title || 'Activity'} (${act.location || ''}) | ${act.duration || ''} | $${act.estimatedCost || 0}</li>`
+    )).join('');
+    return `<h3>Day ${day.day}${day.date ? ` - ${day.date}` : ''}</h3><p><strong>${day.theme || ''}</strong></p><ul>${acts}</ul>`;
+  }).join('');
+
+  const tips = (itinerary.tips || []).map(t => `<li>${t}</li>`).join('');
+  return `
+    <div style="font-family:Arial,sans-serif;line-height:1.6;color:#111;">
+      <h1>${itinerary.tripTitle || 'Trip Itinerary'}</h1>
+      <p>${itinerary.summary || ''}</p>
+      <p><strong>Total Estimated Cost:</strong> $${itinerary.totalEstimatedCost || 0} ${itinerary.currency || 'USD'}</p>
+      ${daysHtml}
+      <h3>Travel Tips</h3>
+      <ul>${tips}</ul>
+    </div>
+  `;
 }
 
 function parseTimeToMinutes(timeStr) {
@@ -535,6 +573,45 @@ app.post('/api/replan-segment', async (req, res) => {
     res.json({ success: true, itinerary, dayIndex, startActivityIndex, endActivityIndex });
   } catch (error) {
     res.status(500).json({ success: false, error: formatApiError(error, 'Failed to replan segment') });
+  }
+});
+
+app.post('/api/email-itinerary', async (req, res) => {
+  try {
+    if (!hasValidMailerConfig()) {
+      return res.status(500).json({
+        success: false,
+        error: 'Mail service is not configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_FROM.'
+      });
+    }
+    const { toEmail, itinerary } = req.body;
+    if (!toEmail || !itinerary?.days) {
+      return res.status(400).json({ success: false, error: 'Missing toEmail or itinerary.' });
+    }
+
+    const cfg = getMailerConfig();
+    const transporter = nodemailer.createTransport({
+      host: cfg.host,
+      port: cfg.port,
+      secure: cfg.secure,
+      auth: { user: cfg.user, pass: cfg.pass }
+    });
+
+    const subject = `Your TravelAI Itinerary: ${itinerary.tripTitle || 'Trip Plan'}`;
+    const html = itineraryToEmailHtml(itinerary);
+    const text = `Trip: ${itinerary.tripTitle || 'Trip Plan'}\nSummary: ${itinerary.summary || ''}\nEstimated Cost: $${itinerary.totalEstimatedCost || 0} ${itinerary.currency || 'USD'}`;
+
+    await transporter.sendMail({
+      from: cfg.from,
+      to: toEmail,
+      subject,
+      text,
+      html
+    });
+
+    res.json({ success: true, message: `Itinerary sent to ${toEmail}` });
+  } catch (error) {
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to send itinerary email') });
   }
 });
 
