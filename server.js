@@ -22,63 +22,10 @@ function hasValidGeminiKey() {
 }
 
 // --- Helpers ---
-
-function buildDemoItinerary({ destination, startDate, budget }) {
-  const city = destination || 'Sample City';
-  const baseDate = startDate || new Date().toISOString().slice(0, 10);
-  const perDayCost = Math.max(80, Math.floor((Number(budget) || 600) / 2));
-  const templates = [
-    {
-      theme: 'Landmarks & Local Culture',
-      activities: [
-        ['09:00 AM', 'City Heritage Walk', 'Guided walk through historic district', 'Old Town Center', 28.6139, 77.2090, '2 hours', 'culture'],
-        ['12:30 PM', 'Local Lunch Spot', 'Popular local cuisine experience', 'Central Market Food Street', 28.6129, 77.2295, '1.5 hours', 'food'],
-        ['03:00 PM', 'Main Landmark Visit', 'Top-rated city attraction', 'City Landmark Plaza', 28.6120, 77.2310, '2 hours', 'sightseeing'],
-        ['07:00 PM', 'Sunset Viewpoint', 'Evening city skyline', 'Riverside Promenade', 28.6070, 77.2420, '1.5 hours', 'relaxation']
-      ]
-    },
-    {
-      theme: 'Museums, Markets & Food',
-      activities: [
-        ['09:30 AM', 'Art & History Museum', 'Explore city history and art', 'National Museum District', 28.6110, 77.2190, '2 hours', 'culture'],
-        ['01:00 PM', 'Street Food Trail', 'Curated tasting across stalls', 'Bazaar Lane', 28.6500, 77.2300, '2 hours', 'food'],
-        ['04:00 PM', 'Local Crafts Market', 'Shop handcrafted souvenirs', 'Handicraft Market', 28.6320, 77.2170, '1.5 hours', 'shopping'],
-        ['08:00 PM', 'Evening Cultural Show', 'Live performance and folk arts', 'City Cultural Center', 28.6200, 77.2080, '2 hours', 'culture']
-      ]
-    }
-  ];
-
-  const days = templates.map((t, i) => ({
-    day: i + 1,
-    date: new Date(new Date(baseDate).getTime() + i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
-    theme: `${t.theme} in ${city}`,
-    activities: t.activities.map(a => ({
-      time: a[0],
-      title: a[1],
-      description: a[2],
-      location: `${a[3]}, ${city}`,
-      lat: a[4],
-      lng: a[5],
-      duration: a[6],
-      estimatedCost: Math.floor(perDayCost / 4),
-      category: a[7]
-    }))
-  }));
-
-  return {
-    tripTitle: `${city} Smart Explorer`,
-    summary: `Demo itinerary for ${city} generated in fallback mode. Add a real GEMINI_API_KEY for fully personalized AI plans.`,
-    totalEstimatedCost: perDayCost * days.length,
-    currency: 'USD',
-    tips: [
-      'Start early to avoid crowds.',
-      'Keep 15-30 minutes buffer between activities.',
-      'Use public transport for city-center hops.',
-      'Carry water and a portable charger.',
-      'Confirm opening hours before departure.'
-    ],
-    days
-  };
+function formatApiError(error, fallbackMessage) {
+  const providerMessage = error?.message || error?.errorDetails?.[0]?.message;
+  if (providerMessage) return `${fallbackMessage} (${providerMessage})`;
+  return fallbackMessage;
 }
 
 const ITINERARY_SCHEMA = {
@@ -233,10 +180,10 @@ app.post('/api/generate-itinerary', async (req, res) => {
     }
 
     if (!hasValidGeminiKey()) {
-      const demoItinerary = enrichWithBookingLinks(
-        buildDemoItinerary({ destination, startDate, budget })
-      );
-      return res.json({ success: true, itinerary: demoItinerary, demoMode: true });
+      return res.status(500).json({
+        success: false,
+        error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.'
+      });
     }
 
     const prompt = `${BASE_PROMPT}
@@ -257,7 +204,7 @@ TRIP DETAILS:
     console.error('Error generating itinerary:', error);
     res.status(500).json({
       success: false,
-      error: 'Failed to generate itinerary. Please try again.'
+      error: formatApiError(error, 'Failed to generate itinerary')
     });
   }
 });
@@ -271,27 +218,10 @@ app.post('/api/replan-activity', async (req, res) => {
     }
 
     if (!hasValidGeminiKey()) {
-      const day = itinerary.days?.[dayIndex];
-      const activity = day?.activities?.[activityIndex];
-      if (!day || !activity) {
-        return res.status(400).json({ success: false, error: 'Invalid day/activity index.' });
-      }
-
-      const fallbackActivity = {
-        ...activity,
-        title: `Alternative: ${activity.title}`,
-        description: `Demo replacement generated without Gemini API key${reason ? ` (${reason})` : ''}.`,
-        estimatedCost: activity.estimatedCost || 0
-      };
-      fallbackActivity.bookingLinks = {
-        googleMaps: `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(fallbackActivity.location)}`,
-        googleSearch: `https://www.google.com/search?q=${encodeURIComponent(`${fallbackActivity.title} ${fallbackActivity.location}`)}+booking`,
-        mapsDirection: fallbackActivity.lat && fallbackActivity.lng
-          ? `https://www.google.com/maps/dir/?api=1&destination=${fallbackActivity.lat},${fallbackActivity.lng}`
-          : null
-      };
-
-      return res.json({ success: true, activity: fallbackActivity, demoMode: true });
+      return res.status(500).json({
+        success: false,
+        error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.'
+      });
     }
 
     const day = itinerary.days[dayIndex];
@@ -347,7 +277,7 @@ Return ONLY a single JSON object for the replacement activity (no markdown, no c
     res.json({ success: true, itinerary, replacedActivity: activity, newActivity });
   } catch (error) {
     console.error('Error replanning:', error);
-    res.status(500).json({ success: false, error: 'Failed to replan activity.' });
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to replan activity') });
   }
 });
 
@@ -355,6 +285,12 @@ Return ONLY a single JSON object for the replacement activity (no markdown, no c
 app.post('/api/replan-day', async (req, res) => {
   try {
     const { itinerary, dayIndex, reason } = req.body;
+    if (!hasValidGeminiKey()) {
+      return res.status(500).json({
+        success: false,
+        error: 'GEMINI_API_KEY is not configured. Set a real Gemini API key in .env and restart server.'
+      });
+    }
     const day = itinerary.days[dayIndex];
     const destination = day.activities[0]?.location || 'the destination';
 
@@ -390,7 +326,7 @@ Return format:
     res.json({ success: true, itinerary: enriched });
   } catch (error) {
     console.error('Error replanning day:', error);
-    res.status(500).json({ success: false, error: 'Failed to replan day.' });
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to replan day') });
   }
 });
 

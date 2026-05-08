@@ -266,7 +266,7 @@ async function replanActivity(dayIndex, activityIndex) {
       if (newCard) { newCard.classList.add('just-replaced'); setTimeout(() => newCard.classList.remove('just-replaced'), 2000); }
     } else {
       if (card) card.style.opacity = '1';
-      showError('Failed to swap activity. Try again.');
+      showError(data.error || 'Failed to swap activity.');
     }
   } catch (err) {
     if (card) card.style.opacity = '1';
@@ -292,7 +292,7 @@ async function replanDay(dayIndex) {
       showDay(dayIndex, itineraryData);
     } else {
       showDay(dayIndex, itineraryData);
-      showError('Failed to replan day.');
+      showError(data.error || 'Failed to replan day.');
     }
   } catch (err) {
     showDay(dayIndex, itineraryData);
