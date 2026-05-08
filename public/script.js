@@ -3,6 +3,7 @@ let directionsService = null;
 let directionsRenderer = null;
 const ACTIVITIES_PER_PAGE = 5;
 const dayActivityPage = {};
+let replanInFlight = false;
 
 // Set default dates
 document.addEventListener('DOMContentLoaded', () => {
@@ -89,10 +90,10 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
   }
 });
 
-function showToast(msg) {
+function showToast(msg, type = 'error') {
   const toast = document.createElement('div');
-  toast.className = 'error-toast';
-  toast.innerHTML = `⚠️ ${msg}`;
+  toast.className = `error-toast${type === 'success' ? ' success' : ''}`;
+  toast.innerHTML = `${type === 'success' ? '✅' : '⚠️'} ${msg}`;
   document.body.appendChild(toast);
   setTimeout(() => { toast.classList.add('show'); }, 10);
   setTimeout(() => { toast.classList.remove('show'); setTimeout(() => toast.remove(), 400); }, 5000);
@@ -112,6 +113,60 @@ function showFatalError(msg) {
 
 function showError(msg) {
   showToast(msg);
+}
+
+function setReplanBusy(isBusy) {
+  replanInFlight = isBusy;
+  document.querySelectorAll('.replan-btn, .btn-replan-day').forEach(btn => {
+    btn.classList.toggle('replan-busy', isBusy);
+    if (isBusy) btn.setAttribute('disabled', 'disabled');
+    else btn.removeAttribute('disabled');
+  });
+}
+
+function askReason(titleText) {
+  const modal = document.getElementById('reason-modal');
+  const input = document.getElementById('reason-input');
+  const okBtn = document.getElementById('reason-ok');
+  const cancelBtn = document.getElementById('reason-cancel');
+  const title = document.getElementById('reason-modal-title');
+
+  if (!modal || !input || !okBtn || !cancelBtn || !title) {
+    return Promise.resolve(prompt(titleText) || '');
+  }
+
+  return new Promise(resolve => {
+    title.textContent = titleText;
+    input.value = '';
+    modal.classList.remove('hidden');
+    modal.setAttribute('aria-hidden', 'false');
+    setTimeout(() => input.focus(), 10);
+
+    const cleanup = (value) => {
+      modal.classList.add('hidden');
+      modal.setAttribute('aria-hidden', 'true');
+      okBtn.removeEventListener('click', onOk);
+      cancelBtn.removeEventListener('click', onCancel);
+      modal.removeEventListener('click', onBackdrop);
+      input.removeEventListener('keydown', onKeyDown);
+      resolve(value);
+    };
+
+    const onOk = () => cleanup(input.value.trim());
+    const onCancel = () => cleanup(null);
+    const onBackdrop = (e) => {
+      if (e.target === modal) cleanup(null);
+    };
+    const onKeyDown = (e) => {
+      if (e.key === 'Enter') onOk();
+      if (e.key === 'Escape') onCancel();
+    };
+
+    okBtn.addEventListener('click', onOk);
+    cancelBtn.addEventListener('click', onCancel);
+    modal.addEventListener('click', onBackdrop);
+    input.addEventListener('keydown', onKeyDown);
+  });
 }
 
 function resetForm() {
@@ -325,7 +380,15 @@ function showDay(index, data) {
   }
 
   content.appendChild(section);
-  if (mapsReady) highlightDayOnMap(day);
+  if (mapsReady && map) {
+    try {
+      highlightDayOnMap(day);
+    } catch (e) {
+      console.error('Failed to render map markers:', e);
+      mapsReady = false;
+      showMapUnavailable('Map rendering failed. Please refresh after checking Maps API restrictions.');
+    }
+  }
 }
 
 function changeActivityPage(dayIndex, delta) {
@@ -335,10 +398,20 @@ function changeActivityPage(dayIndex, delta) {
 
 // Replan activity
 async function replanActivity(dayIndex, activityIndex) {
+  if (replanInFlight) {
+    showToast('Replan already in progress. Please wait.');
+    return;
+  }
   const card = document.getElementById(`activity-${dayIndex}-${activityIndex}`);
   if (card) card.style.opacity = '0.5';
 
-  const reason = prompt('Why do you want to change this? (optional)') || '';
+  const reason = await askReason('Why do you want to change this? (optional)');
+  if (reason === null) {
+    if (card) card.style.opacity = '1';
+    return;
+  }
+
+  setReplanBusy(true);
 
   try {
     const res = await fetch('/api/replan-activity', {
@@ -346,26 +419,47 @@ async function replanActivity(dayIndex, activityIndex) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ itinerary: itineraryData, dayIndex, activityIndex, reason })
     });
-    const data = await res.json();
-    if (data.success) {
-      itineraryData = data.itinerary;
-      showDay(dayIndex, itineraryData);
-      // Flash effect on new card
-      const newCard = document.getElementById(`activity-${dayIndex}-${activityIndex}`);
-      if (newCard) { newCard.classList.add('just-replaced'); setTimeout(() => newCard.classList.remove('just-replaced'), 2000); }
-    } else {
-      if (card) card.style.opacity = '1';
-      showError(data.error || 'Failed to swap activity.');
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (parseErr) {
+      throw new Error(`Invalid replan response (${res.status}).`);
     }
+
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.error || `Failed to swap activity (${res.status}).`);
+    }
+    if (!data?.itinerary?.days) {
+      throw new Error('Replan succeeded but itinerary payload is invalid.');
+    }
+
+    itineraryData = data.itinerary;
+    showDay(dayIndex, itineraryData);
+    const newCard = document.getElementById(`activity-${dayIndex}-${activityIndex}`);
+    if (newCard) {
+      newCard.classList.add('just-replaced');
+      setTimeout(() => newCard.classList.remove('just-replaced'), 2000);
+    }
+    showToast('Activity swapped successfully.', 'success');
   } catch (err) {
+    console.error('Replan activity failed:', err);
+    showError(err?.message || 'Network error during replan.');
+  } finally {
     if (card) card.style.opacity = '1';
-    showError('Network error during replan.');
+    setReplanBusy(false);
   }
 }
 
 // Replan day
 async function replanDay(dayIndex) {
-  const reason = prompt('What would you prefer for this day? (optional)') || '';
+  if (replanInFlight) {
+    showToast('Replan already in progress. Please wait.');
+    return;
+  }
+  const reason = await askReason('What would you prefer for this day? (optional)');
+  if (reason === null) return;
+
+  setReplanBusy(true);
   const content = document.getElementById('itinerary-content');
   content.innerHTML = '<div class="replan-loading"><span class="spinner"></span> Replanning day...</div>';
 
@@ -375,17 +469,28 @@ async function replanDay(dayIndex) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ itinerary: itineraryData, dayIndex, reason })
     });
-    const data = await res.json();
-    if (data.success) {
-      itineraryData = data.itinerary;
-      showDay(dayIndex, itineraryData);
-    } else {
-      showDay(dayIndex, itineraryData);
-      showError(data.error || 'Failed to replan day.');
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (parseErr) {
+      throw new Error(`Invalid replan-day response (${res.status}).`);
     }
-  } catch (err) {
+
+    if (!res.ok || !data?.success) {
+      throw new Error(data?.error || `Failed to replan day (${res.status}).`);
+    }
+    if (!data?.itinerary?.days) {
+      throw new Error('Replan-day succeeded but itinerary payload is invalid.');
+    }
+    itineraryData = data.itinerary;
     showDay(dayIndex, itineraryData);
-    showError('Network error during replan.');
+    showToast('Day replanned successfully.', 'success');
+  } catch (err) {
+    console.error('Replan day failed:', err);
+    showDay(dayIndex, itineraryData);
+    showError(err?.message || 'Network error during replan.');
+  } finally {
+    setReplanBusy(false);
   }
 }
 
