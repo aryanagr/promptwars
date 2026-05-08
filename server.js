@@ -23,6 +23,64 @@ function hasValidGeminiKey() {
 
 // --- Helpers ---
 
+function buildDemoItinerary({ destination, startDate, budget }) {
+  const city = destination || 'Sample City';
+  const baseDate = startDate || new Date().toISOString().slice(0, 10);
+  const perDayCost = Math.max(80, Math.floor((Number(budget) || 600) / 2));
+  const templates = [
+    {
+      theme: 'Landmarks & Local Culture',
+      activities: [
+        ['09:00 AM', 'City Heritage Walk', 'Guided walk through historic district', 'Old Town Center', 28.6139, 77.2090, '2 hours', 'culture'],
+        ['12:30 PM', 'Local Lunch Spot', 'Popular local cuisine experience', 'Central Market Food Street', 28.6129, 77.2295, '1.5 hours', 'food'],
+        ['03:00 PM', 'Main Landmark Visit', 'Top-rated city attraction', 'City Landmark Plaza', 28.6120, 77.2310, '2 hours', 'sightseeing'],
+        ['07:00 PM', 'Sunset Viewpoint', 'Evening city skyline', 'Riverside Promenade', 28.6070, 77.2420, '1.5 hours', 'relaxation']
+      ]
+    },
+    {
+      theme: 'Museums, Markets & Food',
+      activities: [
+        ['09:30 AM', 'Art & History Museum', 'Explore city history and art', 'National Museum District', 28.6110, 77.2190, '2 hours', 'culture'],
+        ['01:00 PM', 'Street Food Trail', 'Curated tasting across stalls', 'Bazaar Lane', 28.6500, 77.2300, '2 hours', 'food'],
+        ['04:00 PM', 'Local Crafts Market', 'Shop handcrafted souvenirs', 'Handicraft Market', 28.6320, 77.2170, '1.5 hours', 'shopping'],
+        ['08:00 PM', 'Evening Cultural Show', 'Live performance and folk arts', 'City Cultural Center', 28.6200, 77.2080, '2 hours', 'culture']
+      ]
+    }
+  ];
+
+  const days = templates.map((t, i) => ({
+    day: i + 1,
+    date: new Date(new Date(baseDate).getTime() + i * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+    theme: `${t.theme} in ${city}`,
+    activities: t.activities.map(a => ({
+      time: a[0],
+      title: a[1],
+      description: a[2],
+      location: `${a[3]}, ${city}`,
+      lat: a[4],
+      lng: a[5],
+      duration: a[6],
+      estimatedCost: Math.floor(perDayCost / 4),
+      category: a[7]
+    }))
+  }));
+
+  return {
+    tripTitle: `${city} Smart Explorer`,
+    summary: `Demo itinerary for ${city} generated in fallback mode. Add a real GEMINI_API_KEY for fully personalized AI plans.`,
+    totalEstimatedCost: perDayCost * days.length,
+    currency: 'USD',
+    tips: [
+      'Start early to avoid crowds.',
+      'Keep 15-30 minutes buffer between activities.',
+      'Use public transport for city-center hops.',
+      'Carry water and a portable charger.',
+      'Confirm opening hours before departure.'
+    ],
+    days
+  };
+}
+
 const ITINERARY_SCHEMA = {
   required: ['tripTitle', 'summary', 'totalEstimatedCost', 'days'],
   dayRequired: ['day', 'activities'],
@@ -168,17 +226,17 @@ app.get('/api/maps-key', (req, res) => {
 // Main itinerary generation
 app.post('/api/generate-itinerary', async (req, res) => {
   try {
-    if (!hasValidGeminiKey()) {
-      return res.status(500).json({
-        success: false,
-        error: 'GEMINI_API_KEY is not configured. Update .env with a real Gemini API key.'
-      });
-    }
-
     const { destination, startDate, endDate, budget, travelers, interests } = req.body;
 
     if (!destination || !startDate || !endDate || !budget) {
       return res.status(400).json({ success: false, error: 'Missing required fields.' });
+    }
+
+    if (!hasValidGeminiKey()) {
+      const demoItinerary = enrichWithBookingLinks(
+        buildDemoItinerary({ destination, startDate, budget })
+      );
+      return res.json({ success: true, itinerary: demoItinerary, demoMode: true });
     }
 
     const prompt = `${BASE_PROMPT}
