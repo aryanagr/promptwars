@@ -243,7 +243,7 @@ async function computeRouteMinutes(origin, destination, travelMode = 'DRIVE') {
 
 const ITINERARY_SCHEMA = {
   required: ['tripTitle', 'summary', 'totalEstimatedCost', 'days'],
-  dayRequired: ['day', 'activities'],
+  dayRequired: ['day', 'date', 'city', 'activities'],
   activityRequired: ['time', 'title', 'description', 'location', 'lat', 'lng', 'duration', 'estimatedCost', 'category']
 };
 
@@ -356,6 +356,7 @@ Format:
     {
       "day": 1,
       "date": "YYYY-MM-DD",
+      "city": "string",
       "theme": "string",
       "activities": [
         {
@@ -401,6 +402,134 @@ async function generateWithRetry(prompt, maxRetries = 1) {
   throw lastError;
 }
 
+function normalizeCityName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function parseDateInputUtc(dateText) {
+  if (!dateText || typeof dateText !== 'string') return null;
+  const parts = dateText.split('-').map(Number);
+  if (parts.length !== 3) return null;
+  const [year, month, day] = parts;
+  if (!year || !month || !day) return null;
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (Number.isNaN(date.getTime())) return null;
+  return date;
+}
+
+function toYmdUtc(dateObj) {
+  return dateObj.toISOString().slice(0, 10);
+}
+
+function buildInclusiveDates(startDate, endDate) {
+  const start = parseDateInputUtc(startDate);
+  const end = parseDateInputUtc(endDate);
+  if (!start || !end || end < start) return [];
+  const dates = [];
+  const cursor = new Date(start);
+  while (cursor <= end) {
+    dates.push(toYmdUtc(cursor));
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return dates;
+}
+
+function sanitizeStops(stops) {
+  if (!Array.isArray(stops)) return [];
+  return stops.map((stop) => ({
+    city: String(stop?.city || '').trim().replace(/\s+/g, ' '),
+    days: Number(stop?.days)
+  })).filter((stop) => stop.city);
+}
+
+function buildCityPlan({ destination, startDate, endDate, stops }) {
+  const dates = buildInclusiveDates(startDate, endDate);
+  if (!dates.length) {
+    throw new Error('Invalid date range. End date must be after or equal to start date.');
+  }
+
+  const sanitizedStops = sanitizeStops(stops);
+  const normalizedDestination = normalizeCityName(destination);
+  const seen = new Set();
+  let stopDaysTotal = 0;
+  const cleanStops = [];
+
+  for (let i = 0; i < sanitizedStops.length; i += 1) {
+    const stop = sanitizedStops[i];
+    const normalizedStop = normalizeCityName(stop.city);
+    if (normalizedStop === normalizedDestination) {
+      throw new Error(`Stop city "${stop.city}" cannot be same as destination city.`);
+    }
+    if (seen.has(normalizedStop)) {
+      throw new Error(`Duplicate stop city: ${stop.city}`);
+    }
+    seen.add(normalizedStop);
+    if (!Number.isInteger(stop.days) || stop.days < 1) {
+      throw new Error(`Stop city "${stop.city}" must have at least 1 day.`);
+    }
+    cleanStops.push(stop);
+    stopDaysTotal += stop.days;
+  }
+
+  if (cleanStops.length > 0 && stopDaysTotal >= dates.length) {
+    throw new Error('Intermediate stop days are too high. Keep at least 1 day for destination city.');
+  }
+
+  const destinationDays = dates.length - stopDaysTotal;
+  if (destinationDays < 1) {
+    throw new Error('Destination city must have at least 1 day.');
+  }
+
+  const cityDayPlan = [];
+  let pointer = 0;
+  cleanStops.forEach((stop) => {
+    for (let i = 0; i < stop.days; i += 1) {
+      cityDayPlan.push({ day: pointer + 1, date: dates[pointer], city: stop.city });
+      pointer += 1;
+    }
+  });
+  for (let i = 0; i < destinationDays; i += 1) {
+    cityDayPlan.push({ day: pointer + 1, date: dates[pointer], city: destination });
+    pointer += 1;
+  }
+
+  return {
+    totalDays: dates.length,
+    dates,
+    stops: cleanStops,
+    destinationDays,
+    cityDayPlan
+  };
+}
+
+function applyCityPlanToItinerary(itinerary, cityPlan) {
+  if (!Array.isArray(itinerary?.days)) {
+    throw new Error('AI response missing day list.');
+  }
+  if (itinerary.days.length > cityPlan.totalDays) {
+    itinerary.days = itinerary.days.slice(0, cityPlan.totalDays);
+  }
+  if (itinerary.days.length < cityPlan.totalDays) {
+    for (let i = itinerary.days.length; i < cityPlan.totalDays; i += 1) {
+      const plan = cityPlan.cityDayPlan[i];
+      itinerary.days.push({
+        day: plan.day,
+        date: plan.date,
+        city: plan.city,
+        theme: `${plan.city} flexible day`,
+        activities: []
+      });
+    }
+  }
+  itinerary.days.forEach((day, idx) => {
+    const plan = cityPlan.cityDayPlan[idx];
+    day.day = plan.day;
+    day.date = plan.date;
+    day.city = plan.city;
+  });
+  return itinerary;
+}
+
 app.get('/api/maps-key', (req, res) => {
   res.json({ key: getMapsApiKey() });
 });
@@ -427,20 +556,48 @@ app.post('/api/generate-itinerary', async (req, res) => {
       travelers,
       interests,
       transportMode,
-      transportBookingRequired
+      transportBookingRequired,
+      stops
     } = req.body;
 
-    if (!destination || !startDate || !endDate || !budget || !fromPlace || !toPlace) {
-      return res.status(400).json({ success: false, error: 'Missing required fields.' });
+    const fromCity = String(fromPlace || '').trim();
+    const toCity = String(toPlace || '').trim();
+    const destinationCity = String(destination || toCity).trim();
+
+    if (!toCity || !destinationCity || !startDate || !endDate || !budget) {
+      return res.status(400).json({ success: false, error: 'Missing required fields. To, Destination, dates, and budget are required.' });
+    }
+
+    if (normalizeCityName(toCity) !== normalizeCityName(destinationCity)) {
+      return res.status(400).json({ success: false, error: 'To and Destination must be the same city.' });
     }
 
     if (!hasValidGeminiKey()) {
       return res.status(500).json({ success: false, error: 'GEMINI_API_KEY is not configured. Set it in Cloud Run env/secrets (or local .env for development).' });
     }
 
-    const prompt = `${BASE_PROMPT}\n\nTRIP DETAILS:\n- From: ${fromPlace}\n- To: ${toPlace}\n- Destination Area: ${destination}\n- Start Date: ${startDate}\n- End Date: ${endDate}\n- Budget: $${budget} USD total\n- Number of Travelers: ${travelers || 1}\n- Interests: ${interests || 'General sightseeing, local food, culture'}\n- Preferred Transport Mode: ${transportMode || 'driving'}\n- Need Transport Booking Options: ${transportBookingRequired ? 'yes' : 'no'}\n\nAlso include practical movement between activities considering the preferred transport mode.`;
+    let cityPlan;
+    try {
+      cityPlan = buildCityPlan({
+        destination: destinationCity,
+        startDate,
+        endDate,
+        stops
+      });
+    } catch (validationError) {
+      return res.status(400).json({ success: false, error: validationError.message || 'Invalid multi-city input.' });
+    }
+    const stopsText = cityPlan.stops.length > 0
+      ? cityPlan.stops.map((s, i) => `${i + 1}. ${s.city} - ${s.days} day(s)`).join('\n')
+      : 'none';
+    const cityDaySchedule = cityPlan.cityDayPlan
+      .map((d) => `Day ${d.day} (${d.date}): ${d.city}`)
+      .join('\n');
 
-    const itinerary = await generateWithRetry(prompt);
+    const prompt = `${BASE_PROMPT}\n\nTRIP DETAILS:\n- From (optional): ${fromCity || 'not provided'}\n- To (final city): ${toCity}\n- Destination city (must match To): ${destinationCity}\n- Start Date: ${startDate}\n- End Date: ${endDate}\n- Total Days: ${cityPlan.totalDays}\n- Intermediate Stops:\n${stopsText}\n- City-Day Plan (must follow exactly):\n${cityDaySchedule}\n- Budget: $${budget} USD total\n- Number of Travelers: ${travelers || 1}\n- Interests: ${interests || 'General sightseeing, local food, culture'}\n- Preferred Transport Mode: ${transportMode || 'driving'}\n- Need Transport Booking Options: ${transportBookingRequired ? 'yes' : 'no'}\n\nHard constraints:\n- Return exactly ${cityPlan.totalDays} day objects.\n- Each day object must include city and match the city-day plan exactly.\n- Do not put Jaipur activities on a Bangalore day or vice versa.\n- Keep all activities for each day inside that day's city.\n- If day city changes from previous day, include one transport activity first (category: transport).\n- Also include practical movement between activities considering the preferred transport mode.`;
+
+    const itineraryRaw = await generateWithRetry(prompt);
+    const itinerary = applyCityPlanToItinerary(itineraryRaw, cityPlan);
     const enriched = enrichWithBookingLinks(itinerary);
     res.json({ success: true, itinerary: enriched });
   } catch (error) {
@@ -526,14 +683,14 @@ app.post('/api/replan-day', async (req, res) => {
     }
 
     const day = itinerary.days[dayIndex];
-    const destination = day.activities[0]?.location || 'the destination';
+    const destination = day.city || day.activities[0]?.location || 'the destination';
 
     const otherDaysPlaces = itinerary.days
       .filter((_, i) => i !== dayIndex)
       .flatMap(d => d.activities.map(a => a.title))
       .join(', ');
 
-    const prompt = `${BASE_PROMPT}\n\nREPLAN REQUEST: Replace ALL activities for Day ${day.day} (${day.date || ''}).\n${reason ? `Reason: ${reason}` : ''}\nDestination area: ${destination}\nAVOID these places (already in other days): ${otherDaysPlaces}\nKeep the same date and day number. Return ONLY the single day object as JSON.\n\nReturn format:\n{\n  "day": ${day.day},\n  "date": "${day.date || ''}",\n  "theme": "New theme",\n  "activities": [ ... ]\n}`;
+    const prompt = `${BASE_PROMPT}\n\nREPLAN REQUEST: Replace ALL activities for Day ${day.day} (${day.date || ''}).\n${reason ? `Reason: ${reason}` : ''}\nDestination area: ${destination}\nAVOID these places (already in other days): ${otherDaysPlaces}\nKeep the same date, day number, and city. Return ONLY the single day object as JSON.\n\nReturn format:\n{\n  "day": ${day.day},\n  "date": "${day.date || ''}",\n  "city": "${day.city || destination}",\n  "theme": "New theme",\n  "activities": [ ... ]\n}`;
 
     const model = getModel();
     const result = await withTimeout(
@@ -544,6 +701,7 @@ app.post('/api/replan-day', async (req, res) => {
     const text = result.response.text();
     const newDay = cleanAndParseJSON(text);
 
+    newDay.city = newDay.city || day.city || destination;
     itinerary.days[dayIndex] = newDay;
     const enriched = enrichWithBookingLinks(itinerary);
 

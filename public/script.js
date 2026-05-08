@@ -11,6 +11,7 @@ const userPreferences = {
   transportMode: 'driving',
   transportBookingRequired: false
 };
+const MAX_INTERMEDIATE_STOPS = 6;
 
 // Set default dates
 document.addEventListener('DOMContentLoaded', () => {
@@ -19,11 +20,113 @@ document.addEventListener('DOMContentLoaded', () => {
   nextWeek.setDate(today.getDate() + 3);
   document.getElementById('start-date').value = formatDate(today);
   document.getElementById('end-date').value = formatDate(nextWeek);
+  initRoutePlannerInputs();
   refreshServiceAvailability();
 });
 
 function formatDate(d) {
   return d.toISOString().split('T')[0];
+}
+
+function normalizeCityName(value) {
+  return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
+}
+
+function syncDestinationWithTo() {
+  const toInput = document.getElementById('to-place');
+  const destinationInput = document.getElementById('destination');
+  if (!toInput || !destinationInput) return;
+  destinationInput.value = toInput.value.trim();
+}
+
+function createStopRow(city = '', days = 1) {
+  const row = document.createElement('div');
+  row.className = 'stop-row';
+  row.innerHTML = `
+    <input type="text" class="stop-city" data-field="city" placeholder="e.g. Udaipur, India" value="${city}">
+    <input type="number" class="stop-days" data-field="days" min="1" max="30" step="1" value="${days}">
+    <button type="button" class="btn-secondary stop-remove-btn" aria-label="Remove stop">✖</button>
+  `;
+  const removeBtn = row.querySelector('.stop-remove-btn');
+  removeBtn.addEventListener('click', () => row.remove());
+  return row;
+}
+
+function addStopRow(city = '', days = 1) {
+  const container = document.getElementById('stops-container');
+  if (!container) return;
+  if (container.children.length >= MAX_INTERMEDIATE_STOPS) {
+    showToast(`You can add up to ${MAX_INTERMEDIATE_STOPS} stops.`);
+    return;
+  }
+  container.appendChild(createStopRow(city, days));
+}
+
+function collectIntermediateStops() {
+  const container = document.getElementById('stops-container');
+  if (!container) return [];
+  const rows = [...container.querySelectorAll('.stop-row')];
+  return rows.map((row) => {
+    const city = (row.querySelector('[data-field="city"]')?.value || '').trim();
+    const daysRaw = row.querySelector('[data-field="days"]')?.value;
+    const days = Number(daysRaw);
+    return { city, days };
+  }).filter((stop) => stop.city);
+}
+
+function calculateTripDays(startDate, endDate) {
+  if (!startDate || !endDate) return 0;
+  const start = new Date(`${startDate}T00:00:00Z`);
+  const end = new Date(`${endDate}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) return 0;
+  const diff = end.getTime() - start.getTime();
+  if (diff < 0) return 0;
+  return Math.floor(diff / 86400000) + 1;
+}
+
+function validateIntermediateStops(stops, destination, totalTripDays) {
+  let stopDaysTotal = 0;
+  const seen = new Set();
+  const normalizedDestination = normalizeCityName(destination);
+
+  for (let i = 0; i < stops.length; i += 1) {
+    const stop = stops[i];
+    const normalizedCity = normalizeCityName(stop.city);
+    if (!normalizedCity) {
+      return { valid: false, error: `Stop ${i + 1} city is empty.` };
+    }
+    if (normalizedCity === normalizedDestination) {
+      return { valid: false, error: `Stop ${i + 1} cannot be same as destination city.` };
+    }
+    if (seen.has(normalizedCity)) {
+      return { valid: false, error: `Duplicate stop city: ${stop.city}` };
+    }
+    seen.add(normalizedCity);
+
+    if (!Number.isInteger(stop.days) || stop.days < 1) {
+      return { valid: false, error: `Stop ${i + 1} days must be at least 1.` };
+    }
+    stopDaysTotal += stop.days;
+  }
+
+  if (stops.length > 0 && stopDaysTotal >= totalTripDays) {
+    return { valid: false, error: 'Stop days are too many. Keep at least 1 day for destination city.' };
+  }
+  return { valid: true, stopDaysTotal };
+}
+
+function initRoutePlannerInputs() {
+  const toInput = document.getElementById('to-place');
+  if (toInput) {
+    toInput.addEventListener('input', syncDestinationWithTo);
+    toInput.addEventListener('blur', syncDestinationWithTo);
+  }
+  syncDestinationWithTo();
+
+  const addStopBtn = document.getElementById('add-stop-btn');
+  if (addStopBtn) {
+    addStopBtn.addEventListener('click', () => addStopRow('', 1));
+  }
 }
 
 async function refreshServiceAvailability() {
@@ -44,15 +147,6 @@ async function refreshServiceAvailability() {
 // Form submission
 document.getElementById('trip-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const btn = document.getElementById('generate-btn');
-  btn.querySelector('.btn-text').style.display = 'none';
-  btn.querySelector('.btn-loader').style.display = 'inline-flex';
-  btn.disabled = true;
-
-  document.getElementById('hero').style.display = 'none';
-  document.getElementById('loading-section').style.display = 'flex';
-  animateLoadingSteps();
-
   const interests = [...document.querySelectorAll('.interest-chip input:checked')]
     .map(cb => cb.value).join(', ') || 'General sightseeing';
 
@@ -60,19 +154,62 @@ document.getElementById('trip-form').addEventListener('submit', async (e) => {
   userPreferences.toPlace = document.getElementById('to-place').value.trim();
   userPreferences.transportMode = document.getElementById('transport-mode').value;
   userPreferences.transportBookingRequired = !!document.getElementById('book-transport-required').checked;
+  syncDestinationWithTo();
+
+  const destinationCity = document.getElementById('destination').value.trim();
+  const startDate = document.getElementById('start-date').value;
+  const endDate = document.getElementById('end-date').value;
+  const budget = document.getElementById('budget').value;
+  const travelers = document.getElementById('travelers').value;
+  const stops = collectIntermediateStops().map((stop) => ({
+    city: stop.city,
+    days: Number(stop.days)
+  }));
+  const tripDays = calculateTripDays(startDate, endDate);
+
+  if (!userPreferences.toPlace) {
+    showError('To (final city) is required.');
+    return;
+  }
+  if (!destinationCity) {
+    showError('Destination city is required.');
+    return;
+  }
+  if (normalizeCityName(userPreferences.toPlace) !== normalizeCityName(destinationCity)) {
+    showError('To and Destination must be the same city.');
+    return;
+  }
+  if (!startDate || !endDate || tripDays < 1) {
+    showError('Please provide a valid start and end date.');
+    return;
+  }
+  const stopValidation = validateIntermediateStops(stops, destinationCity, tripDays);
+  if (!stopValidation.valid) {
+    showError(stopValidation.error);
+    return;
+  }
 
   const payload = {
     fromPlace: userPreferences.fromPlace,
     toPlace: userPreferences.toPlace,
-    destination: document.getElementById('destination').value,
-    startDate: document.getElementById('start-date').value,
-    endDate: document.getElementById('end-date').value,
-    budget: document.getElementById('budget').value,
-    travelers: document.getElementById('travelers').value,
+    destination: destinationCity,
+    startDate,
+    endDate,
+    budget,
+    travelers,
     interests,
     transportMode: userPreferences.transportMode,
-    transportBookingRequired: userPreferences.transportBookingRequired
+    transportBookingRequired: userPreferences.transportBookingRequired,
+    stops
   };
+
+  const btn = document.getElementById('generate-btn');
+  btn.querySelector('.btn-text').style.display = 'none';
+  btn.querySelector('.btn-loader').style.display = 'inline-flex';
+  btn.disabled = true;
+  document.getElementById('hero').style.display = 'none';
+  document.getElementById('loading-section').style.display = 'flex';
+  animateLoadingSteps();
 
   // Timeout controller - 60 second max
   const controller = new AbortController();
@@ -346,7 +483,7 @@ function showDay(index, data) {
   // Day header with replan button
   section.innerHTML = `
     <div class="day-header-row">
-      <div class="day-header">📌 ${day.theme || 'Day ' + day.day} <span style="font-size:13px;color:var(--text-secondary);font-weight:400;">${day.date || ''}</span></div>
+      <div class="day-header">📌 ${day.theme || 'Day ' + day.day} <span style="font-size:13px;color:var(--text-secondary);font-weight:400;">${day.date || ''}${day.city ? ` · ${day.city}` : ''}</span></div>
       <div class="day-header-actions">
         <button class="btn-route-day" onclick="startRoute(${index})">▶ Start Route</button>
         <button class="btn-route-day" onclick="clearRoute()">✖ Clear Route</button>

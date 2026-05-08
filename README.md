@@ -6,6 +6,7 @@ AI-powered travel itinerary generator built for hackathon prototyping with Googl
 - Generate day-wise itinerary using Gemini
 - Budget-aware recommendations
 - Interest-based activity planning
+- Multi-city planning with intermediate stops and day allocation per stop
 - Interactive Google Map with activity markers
 - Day tabs, timeline cards, and travel tips UI
 
@@ -52,7 +53,12 @@ Open: `http://localhost:3000`
 ### Sample Request (`/api/generate-itinerary`)
 ```json
 {
-  "destination": "Tokyo, Japan",
+  "fromPlace": "Mumbai, India",
+  "toPlace": "Jaipur, India",
+  "destination": "Jaipur, India",
+  "stops": [
+    { "city": "Udaipur, India", "days": 1 }
+  ],
   "startDate": "2026-05-10",
   "endDate": "2026-05-13",
   "budget": 2000,

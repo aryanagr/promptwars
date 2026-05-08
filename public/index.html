@@ -7,7 +7,7 @@
   <title>TravelAI — Smart Travel Planner</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Outfit:wght@700;800&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=20260508-4">
+  <link rel="stylesheet" href="style.css?v=20260508-6">
 </head>
 <body>
   <section id="hero">
@@ -22,16 +22,23 @@
       <form id="trip-form" class="glass-card">
         <div class="form-grid">
           <div class="form-group">
-            <label for="from-place">🛫 From</label>
-            <input type="text" id="from-place" placeholder="e.g. Mumbai, India" required>
+            <label for="from-place">🛫 From (Optional)</label>
+            <input type="text" id="from-place" placeholder="e.g. Mumbai, India">
           </div>
           <div class="form-group">
-            <label for="to-place">🛬 To</label>
-            <input type="text" id="to-place" placeholder="e.g. Tokyo, Japan" required>
+            <label for="to-place">🛬 To (Final City)</label>
+            <input type="text" id="to-place" placeholder="e.g. Jaipur, India" required>
           </div>
           <div class="form-group full-width">
-            <label for="destination">🌍 Destination (Main City)</label>
-            <input type="text" id="destination" placeholder="e.g. Shinjuku, Tokyo" required>
+            <label for="destination">🌍 Destination (Auto-Synced with To)</label>
+            <input type="text" id="destination" placeholder="Auto-filled from To city" required readonly>
+            <small class="form-hint">Destination stays same as <strong>To</strong> for consistent planning.</small>
+          </div>
+          <div class="form-group full-width">
+            <label>🧭 Intermediate Stops (Optional)</label>
+            <div id="stops-container" class="stops-container"></div>
+            <button type="button" id="add-stop-btn" class="btn-secondary btn-stop-add">+ Add Stop City</button>
+            <small class="form-hint">Add cities between From and To, and set days to stay in each stop.</small>
           </div>
           <div class="form-group"><label for="start-date">📅 Start Date</label><input type="date" id="start-date" required></div>
           <div class="form-group"><label for="end-date">📅 End Date</label><input type="date" id="end-date" required></div>
@@ -125,6 +132,6 @@
   </div>
 
   <footer><p>Built with ❤️ using <strong>Gemini AI</strong> & <strong>Google Maps</strong> | PromptWars 2026</p></footer>
-  <script src="script.js?v=20260508-5"></script>
+  <script src="script.js?v=20260508-6"></script>
 </body>
 </html>
