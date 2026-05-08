@@ -1112,3 +1112,255 @@ document.getElementById('email-btn').addEventListener('click', async () => {
     showError('Network error while sending email.');
   }
 });
+
+// === Auth + saved-itinerary storage (Google Sign-In + server endpoints) ===
+
+let authState = { user: null, idToken: null };
+
+// Stable anonymous session id so unsigned users still get per-browser storage.
+function getSessionId() {
+  let id = null;
+  try { id = localStorage.getItem('travelai-session'); } catch {}
+  if (!id) {
+    id = (crypto?.randomUUID?.() || 'anon-' + Date.now() + '-' + Math.random().toString(36).slice(2));
+    try { localStorage.setItem('travelai-session', id); } catch {}
+  }
+  return id;
+}
+
+function authStorageHeaders() {
+  const headers = { 'Content-Type': 'application/json', 'X-Session-ID': getSessionId() };
+  if (authState.idToken) headers['X-ID-Token'] = authState.idToken;
+  return headers;
+}
+
+function renderAuthSlot() {
+  const slot = document.getElementById('auth-slot');
+  if (!slot) return;
+  slot.innerHTML = '';
+  if (authState.user) {
+    const wrap = document.createElement('div');
+    wrap.className = 'auth-user';
+    wrap.setAttribute('aria-label', 'Signed in as ' + authState.user.email);
+    if (authState.user.picture) {
+      const img = document.createElement('img');
+      img.src = authState.user.picture;
+      img.alt = '';
+      img.referrerPolicy = 'no-referrer';
+      wrap.appendChild(img);
+    }
+    const span = document.createElement('span');
+    span.textContent = authState.user.name || authState.user.email;
+    wrap.appendChild(span);
+    const out = document.createElement('button');
+    out.type = 'button';
+    out.className = 'btn-secondary';
+    out.textContent = 'Sign out';
+    out.addEventListener('click', signOut);
+    slot.append(wrap, out);
+  } else {
+    // GIS button gets injected here when the SDK is ready.
+    const target = document.createElement('div');
+    target.id = 'gis-button';
+    slot.appendChild(target);
+  }
+}
+
+function decodeJwtPayload(token) {
+  try {
+    const part = token.split('.')[1];
+    const json = atob(part.replace(/-/g, '+').replace(/_/g, '/'));
+    return JSON.parse(decodeURIComponent(escape(json)));
+  } catch { return null; }
+}
+
+function onGisCredential(response) {
+  const idToken = response?.credential;
+  if (!idToken) return;
+  const payload = decodeJwtPayload(idToken);
+  if (!payload?.email) { showError('Sign-in failed: invalid token.'); return; }
+  authState = {
+    idToken,
+    user: { email: payload.email, name: payload.name, picture: payload.picture, sub: payload.sub }
+  };
+  try { sessionStorage.setItem('travelai-id-token', idToken); } catch {}
+  renderAuthSlot();
+  showToast('Signed in as ' + payload.email, 'success');
+}
+
+function signOut() {
+  authState = { user: null, idToken: null };
+  try { sessionStorage.removeItem('travelai-id-token'); } catch {}
+  if (window.google?.accounts?.id) {
+    try { window.google.accounts.id.disableAutoSelect(); } catch {}
+  }
+  renderAuthSlot();
+  showToast('Signed out.', 'success');
+}
+
+async function bootstrapGoogleSignIn() {
+  let cfg = null;
+  try {
+    const res = await fetch('/api/auth-config');
+    if (res.ok) cfg = await res.json();
+  } catch { return; }
+  if (!cfg?.googleClientId) {
+    renderAuthSlot();
+    return;
+  }
+  // Restore previous session if still valid (no expiry check — server re-verifies).
+  try {
+    const cached = sessionStorage.getItem('travelai-id-token');
+    if (cached) {
+      const payload = decodeJwtPayload(cached);
+      if (payload?.email && payload.exp && payload.exp * 1000 > Date.now()) {
+        authState = { idToken: cached, user: { email: payload.email, name: payload.name, picture: payload.picture, sub: payload.sub } };
+      }
+    }
+  } catch {}
+  renderAuthSlot();
+  await new Promise((resolve, reject) => {
+    const s = document.createElement('script');
+    s.src = 'https://accounts.google.com/gsi/client';
+    s.async = true; s.defer = true;
+    s.onload = resolve; s.onerror = reject;
+    document.head.appendChild(s);
+  }).catch(() => {});
+  if (!window.google?.accounts?.id) return;
+  window.google.accounts.id.initialize({ client_id: cfg.googleClientId, callback: onGisCredential });
+  if (!authState.user) {
+    const target = document.getElementById('gis-button');
+    if (target) {
+      window.google.accounts.id.renderButton(target, { theme: 'outline', size: 'medium', type: 'standard', shape: 'pill' });
+    }
+  }
+}
+
+async function saveCurrentItinerary() {
+  if (!itineraryData) { showError('Generate an itinerary first.'); return; }
+  try {
+    const res = await fetch('/api/save-itinerary', {
+      method: 'POST',
+      headers: authStorageHeaders(),
+      body: JSON.stringify({ itinerary: itineraryData, idToken: authState.idToken || undefined })
+    });
+    let data = null;
+    try { data = await res.json(); } catch {}
+    if (!res.ok || !data?.success) { showError(data?.error || `Failed to save (${res.status}).`); return; }
+    showToast(`Trip saved (${data.count} total).`, 'success');
+  } catch {
+    showError('Network error while saving.');
+  }
+}
+
+async function openSavedTrips() {
+  const modal = document.getElementById('saved-modal');
+  const list = document.getElementById('saved-list');
+  const emptyMsg = document.getElementById('saved-modal-empty');
+  if (!modal || !list) return;
+  list.innerHTML = '';
+  emptyMsg.style.display = 'block';
+  modal.classList.remove('hidden');
+  modal.setAttribute('aria-hidden', 'false');
+  try {
+    const res = await fetch('/api/saved-itineraries', {
+      method: 'POST',
+      headers: authStorageHeaders(),
+      body: JSON.stringify({ idToken: authState.idToken || undefined })
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.success) {
+      emptyMsg.textContent = data?.error || 'Could not load saved trips.';
+      return;
+    }
+    if (!data.items?.length) {
+      emptyMsg.textContent = 'No saved trips yet. Generate one and click Save Trip.';
+      return;
+    }
+    emptyMsg.style.display = 'none';
+    data.items.forEach((item) => {
+      const li = document.createElement('li');
+      const meta = document.createElement('div');
+      const title = document.createElement('div');
+      title.textContent = item.tripTitle;
+      title.style.fontWeight = '600';
+      const sub = document.createElement('div');
+      sub.className = 'saved-meta';
+      sub.textContent = new Date(item.savedAt).toLocaleString();
+      meta.append(title, sub);
+      const actions = document.createElement('div');
+      actions.className = 'saved-actions';
+      const loadBtn = document.createElement('button');
+      loadBtn.type = 'button';
+      loadBtn.className = 'btn-secondary';
+      loadBtn.textContent = 'Load';
+      loadBtn.addEventListener('click', () => loadSavedTrip(item.id));
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'btn-secondary';
+      delBtn.textContent = 'Delete';
+      delBtn.addEventListener('click', () => deleteSavedTrip(item.id, li));
+      actions.append(loadBtn, delBtn);
+      li.append(meta, actions);
+      list.appendChild(li);
+    });
+  } catch {
+    emptyMsg.textContent = 'Network error while loading saved trips.';
+  }
+}
+
+function closeSavedTrips() {
+  const modal = document.getElementById('saved-modal');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  modal.setAttribute('aria-hidden', 'true');
+}
+
+async function loadSavedTrip(id) {
+  try {
+    const res = await fetch(`/api/saved-itinerary/${encodeURIComponent(id)}`, {
+      method: 'POST',
+      headers: authStorageHeaders(),
+      body: JSON.stringify({ idToken: authState.idToken || undefined })
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.success) { showError(data?.error || 'Failed to load.'); return; }
+    itineraryData = data.item.itinerary;
+    closeSavedTrips();
+    try { await loadMapsAPI(); mapsReady = true; } catch { mapsReady = false; }
+    document.getElementById('hero').style.display = 'none';
+    document.getElementById('loading-section').style.display = 'none';
+    renderResults(itineraryData);
+    showToast('Trip loaded.', 'success');
+  } catch {
+    showError('Network error while loading saved trip.');
+  }
+}
+
+async function deleteSavedTrip(id, listItem) {
+  try {
+    const res = await fetch(`/api/saved-itinerary/${encodeURIComponent(id)}/delete`, {
+      method: 'POST',
+      headers: authStorageHeaders(),
+      body: JSON.stringify({ idToken: authState.idToken || undefined })
+    });
+    const data = await res.json();
+    if (!res.ok || !data?.success) { showError(data?.error || 'Failed to delete.'); return; }
+    if (listItem) listItem.remove();
+    showToast('Deleted.', 'success');
+  } catch {
+    showError('Network error while deleting.');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  bootstrapGoogleSignIn();
+  const savedBtn = document.getElementById('saved-trips-btn');
+  if (savedBtn) savedBtn.addEventListener('click', openSavedTrips);
+  const savedClose = document.getElementById('saved-close');
+  if (savedClose) savedClose.addEventListener('click', closeSavedTrips);
+  const savedModal = document.getElementById('saved-modal');
+  if (savedModal) savedModal.addEventListener('click', (e) => { if (e.target === savedModal) closeSavedTrips(); });
+  const saveBtn = document.getElementById('save-btn');
+  if (saveBtn) saveBtn.addEventListener('click', saveCurrentItinerary);
+});

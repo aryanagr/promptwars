@@ -9,6 +9,8 @@ const cors = require('cors');
 const { GoogleGenerativeAI } = require('@google/generative-ai');
 const nodemailer = require('nodemailer');
 const { jsonrepair } = require('jsonrepair');
+const helmet = require('helmet');
+const compression = require('compression');
 const {
   normalizeCityName,
   sanitizeStops,
@@ -194,12 +196,12 @@ function getAllowedOrigins() {
 
 const CSP_DIRECTIVES = [
   "default-src 'self'",
-  "script-src 'self' 'unsafe-inline' https://maps.googleapis.com https://maps.gstatic.com https://www.googletagmanager.com https://www.google-analytics.com",
-  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  "script-src 'self' 'unsafe-inline' https://maps.googleapis.com https://maps.gstatic.com https://www.googletagmanager.com https://www.google-analytics.com https://accounts.google.com https://apis.google.com",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://accounts.google.com",
   "font-src 'self' https://fonts.gstatic.com data:",
-  "img-src 'self' data: blob: https://maps.googleapis.com https://maps.gstatic.com https://*.googleusercontent.com https://www.google-analytics.com https://www.googletagmanager.com",
-  "connect-src 'self' https://maps.googleapis.com https://maps.gstatic.com https://places.googleapis.com https://routes.googleapis.com https://www.google-analytics.com https://*.google-analytics.com https://www.googletagmanager.com",
-  "frame-src 'self' https://www.google.com",
+  "img-src 'self' data: blob: https://maps.googleapis.com https://maps.gstatic.com https://*.googleusercontent.com https://www.google-analytics.com https://www.googletagmanager.com https://lh3.googleusercontent.com",
+  "connect-src 'self' https://maps.googleapis.com https://maps.gstatic.com https://places.googleapis.com https://routes.googleapis.com https://www.google-analytics.com https://*.google-analytics.com https://www.googletagmanager.com https://accounts.google.com https://oauth2.googleapis.com",
+  "frame-src 'self' https://www.google.com https://accounts.google.com",
   "frame-ancestors 'none'",
   "base-uri 'self'",
   "form-action 'self'",
@@ -322,6 +324,27 @@ function setCachedItinerary(cacheKey, itinerary) {
 // === App middleware wiring (CORS → JSON → security headers → static) ===
 
 const allowedOrigins = getAllowedOrigins();
+
+// Helmet adds COEP/COOP/CORP/Origin-Agent-Cluster/X-DNS-Prefetch/X-Download/
+// X-Permitted-Cross-Domain headers; CSP is handled by our own middleware.
+app.use(helmet({
+  contentSecurityPolicy: false,
+  crossOriginEmbedderPolicy: false, // would block Maps SDK
+  crossOriginResourcePolicy: { policy: 'same-site' }
+}));
+
+// gzip/brotli responses where appropriate (skips already-compressed assets).
+app.use(compression());
+
+// Per-request ID for log correlation.
+let requestSeq = 0;
+app.use((req, res, next) => {
+  const incoming = req.get('x-request-id');
+  req.requestId = incoming || `req-${Date.now().toString(36)}-${(requestSeq++).toString(36)}`;
+  res.setHeader('X-Request-ID', req.requestId);
+  next();
+});
+
 // Default: deny cross-origin browser requests (same-origin still works because
 // browsers don't enforce CORS on same-origin). Set CORS_ORIGINS env to allow
 // specific cross-origin clients (comma-separated list).
@@ -788,6 +811,118 @@ app.get('/api/health', (req, res) => {
 // Frontend reads this for Google Analytics auto-bootstrap.
 app.get('/api/analytics-config', (req, res) => {
   res.json({ measurementId: envValue('GA_MEASUREMENT_ID') || null });
+});
+
+// Frontend reads this to render Sign-In with Google when an OAuth client is configured.
+app.get('/api/auth-config', (req, res) => {
+  res.json({
+    googleClientId: envValue('GOOGLE_OAUTH_CLIENT_ID') || null,
+    storageEnabled: true
+  });
+});
+
+// === Saved itineraries (in-memory keyed by signed-in email or anon session ID) ===
+
+const savedItineraries = new Map();
+const SAVED_MAX_PER_USER = Number(envValue('SAVED_MAX_PER_USER') || 25);
+
+// Verify a Google ID token by hitting Google's tokeninfo endpoint.
+// Returns { email, name, sub } on success, or null on failure.
+async function verifyGoogleIdToken(idToken) {
+  if (!idToken || typeof idToken !== 'string' || idToken.length > 4096) return null;
+  try {
+    const resp = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(idToken)}`);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const expectedAud = envValue('GOOGLE_OAUTH_CLIENT_ID');
+    if (expectedAud && data.aud !== expectedAud) return null;
+    if (!data.email_verified) return null;
+    return { email: data.email, name: data.name, sub: data.sub };
+  } catch (err) {
+    log.warn('verifyGoogleIdToken failed', { error: err?.message });
+    return null;
+  }
+}
+
+// Resolve the storage scope for a request: signed-in email > anon session cookie.
+async function resolveStorageScope(req) {
+  const idToken = req.body?.idToken || req.get('x-id-token');
+  if (idToken) {
+    const user = await verifyGoogleIdToken(idToken);
+    if (user) return { scope: `user:${user.email}`, user };
+  }
+  const session = sanitizeText(req.body?.sessionId || req.get('x-session-id') || '', 64);
+  if (session) return { scope: `anon:${session}`, user: null };
+  return null;
+}
+
+app.post('/api/save-itinerary', originGuard, writeApiLimiter, async (req, res) => {
+  try {
+    const { itinerary } = req.body || {};
+    if (!itinerary?.days || !Array.isArray(itinerary.days)) {
+      return res.status(400).json({ success: false, error: 'Missing itinerary.' });
+    }
+    const scopeInfo = await resolveStorageScope(req);
+    if (!scopeInfo) return res.status(401).json({ success: false, error: 'Sign in or send X-Session-ID to save.' });
+    const list = savedItineraries.get(scopeInfo.scope) || [];
+    const id = crypto.randomBytes(8).toString('hex');
+    list.unshift({
+      id,
+      savedAt: new Date().toISOString(),
+      tripTitle: sanitizeText(itinerary.tripTitle || 'Untitled trip', 160),
+      itinerary: structuredClone(itinerary)
+    });
+    while (list.length > SAVED_MAX_PER_USER) list.pop();
+    savedItineraries.set(scopeInfo.scope, list);
+    res.json({ success: true, id, count: list.length });
+  } catch (error) {
+    log.error('save-itinerary failed', { error: error?.message });
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to save itinerary') });
+  }
+});
+
+app.post('/api/saved-itineraries', originGuard, writeApiLimiter, async (req, res) => {
+  try {
+    const scopeInfo = await resolveStorageScope(req);
+    if (!scopeInfo) return res.status(401).json({ success: false, error: 'Sign in or send X-Session-ID to load.' });
+    const list = savedItineraries.get(scopeInfo.scope) || [];
+    res.json({
+      success: true,
+      user: scopeInfo.user,
+      count: list.length,
+      items: list.map(({ id, savedAt, tripTitle }) => ({ id, savedAt, tripTitle }))
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to list saved itineraries') });
+  }
+});
+
+app.post('/api/saved-itinerary/:id', originGuard, writeApiLimiter, async (req, res) => {
+  try {
+    const scopeInfo = await resolveStorageScope(req);
+    if (!scopeInfo) return res.status(401).json({ success: false, error: 'Sign in or send X-Session-ID to load.' });
+    const id = sanitizeText(req.params.id, 64);
+    const list = savedItineraries.get(scopeInfo.scope) || [];
+    const found = list.find((entry) => entry.id === id);
+    if (!found) return res.status(404).json({ success: false, error: 'Saved itinerary not found.' });
+    res.json({ success: true, item: found });
+  } catch (error) {
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to load saved itinerary') });
+  }
+});
+
+app.post('/api/saved-itinerary/:id/delete', originGuard, writeApiLimiter, async (req, res) => {
+  try {
+    const scopeInfo = await resolveStorageScope(req);
+    if (!scopeInfo) return res.status(401).json({ success: false, error: 'Sign in or send X-Session-ID.' });
+    const id = sanitizeText(req.params.id, 64);
+    const list = savedItineraries.get(scopeInfo.scope) || [];
+    const next = list.filter((entry) => entry.id !== id);
+    savedItineraries.set(scopeInfo.scope, next);
+    res.json({ success: true, deleted: list.length - next.length });
+  } catch (error) {
+    res.status(500).json({ success: false, error: formatApiError(error, 'Failed to delete') });
+  }
 });
 
 // Resolve free-text place name to lat/lng via Geocoding API.

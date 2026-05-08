@@ -92,9 +92,13 @@
   <main id="main-content">
   <section id="hero">
     <div class="hero-bg-orbs"><div class="orb orb-1"></div><div class="orb orb-2"></div><div class="orb orb-3"></div></div>
-    <nav id="navbar">
-      <div class="logo"><span class="logo-icon">✈️</span><span class="logo-text">Travel<span class="logo-accent">AI</span></span></div>
-      <div class="nav-tagline">Powered by Gemini & Google Maps</div>
+    <nav id="navbar" aria-label="Primary">
+      <div class="logo"><span class="logo-icon" aria-hidden="true">✈️</span><span class="logo-text">Travel<span class="logo-accent">AI</span></span></div>
+      <div class="nav-tagline">Powered by Gemini &amp; Google Maps</div>
+      <div class="nav-actions">
+        <button type="button" id="saved-trips-btn" class="btn-secondary" aria-haspopup="dialog">📂 Saved trips</button>
+        <div id="auth-slot" class="auth-slot" aria-live="polite"></div>
+      </div>
     </nav>
     <div class="hero-content">
       <h1 class="hero-title">Plan Your Dream Trip<br><span class="gradient-text">With AI Intelligence</span></h1>
@@ -180,6 +184,7 @@
     <div class="results-header">
       <div class="results-actions">
         <button id="back-btn" class="btn-secondary">← Plan Another Trip</button>
+        <button id="save-btn" class="btn-secondary">💾 Save Trip</button>
         <button id="email-btn" class="btn-secondary">✉️ Email Itinerary</button>
       </div>
       <h2 id="trip-title" class="gradient-text"></h2>
@@ -201,6 +206,17 @@
   </section>
 
   </main>
+
+  <div id="saved-modal" class="reason-modal hidden" role="dialog" aria-modal="true" aria-labelledby="saved-modal-title" aria-hidden="true">
+    <div class="reason-modal-card glass-card">
+      <h3 id="saved-modal-title">Your saved trips</h3>
+      <p class="form-hint" id="saved-modal-empty">No saved trips yet. Generate one and click Save Trip.</p>
+      <ul id="saved-list" class="saved-list" aria-label="Saved itineraries"></ul>
+      <div class="reason-modal-actions">
+        <button type="button" id="saved-close" class="btn-secondary">Close</button>
+      </div>
+    </div>
+  </div>
 
   <div id="reason-modal" class="reason-modal hidden" aria-hidden="true">
     <div class="reason-modal-card glass-card">

@@ -40,6 +40,14 @@ body { font-family: var(--font-body); background: var(--bg-primary); color: var(
 .logo-text { font-family:var(--font-display); font-size:24px; font-weight:800; }
 .logo-accent { background:var(--gradient-main); -webkit-background-clip:text; -webkit-text-fill-color:transparent; }
 .nav-tagline { color:var(--text-secondary); font-size:14px; }
+.nav-actions { display:flex; align-items:center; gap:10px; margin-left:auto; }
+.auth-slot { min-width:140px; display:flex; align-items:center; gap:8px; }
+.auth-slot .auth-user { display:flex; align-items:center; gap:8px; padding:6px 10px; border:1px solid var(--glass-border); border-radius:20px; background:rgba(255,255,255,0.05); font-size:13px; }
+.auth-slot .auth-user img { width:24px; height:24px; border-radius:50%; }
+.saved-list { list-style:none; max-height:50vh; overflow-y:auto; padding:0; margin:8px 0 14px; display:flex; flex-direction:column; gap:8px; }
+.saved-list li { display:flex; align-items:center; justify-content:space-between; gap:10px; padding:10px 12px; background:rgba(255,255,255,0.04); border:1px solid var(--glass-border); border-radius:8px; }
+.saved-list .saved-meta { font-size:12px; color:var(--text-secondary); }
+.saved-list .saved-actions { display:flex; gap:6px; }
 
 /* === Hero === */
 #hero { position:relative; min-height:100vh; display:flex; flex-direction:column; }
